@@ -52,7 +52,7 @@ lipo -create \
 	-output "$out/universal/libdreamail_rpgp.a"
 
 # Every function the header declares must be exported, and nothing else
-# named mm_ may be.
+# named dm_ (or mm_, the prefix before v0.2.0) may be.
 # A step that finds nothing must say so, not end the script silently
 # (grep exits 1 on no match, which `set -e -o pipefail` turns into an exit).
 expected=$(grep -oE 'dm_pgp_[a-z_]+\(' include/dreamail_rpgp.h | tr -d '(' | LC_ALL=C sort -u || true)
@@ -62,7 +62,7 @@ expected=$(grep -oE 'dm_pgp_[a-z_]+\(' include/dreamail_rpgp.h | tr -d '(' | LC_
 # symbol table next to it are fine, so the exit status is not used: the
 # comparison below decides, and nm's messages are shown only if it fails.
 nm -gU "$out/universal/libdreamail_rpgp.a" > "$out/symbols.txt" 2> "$out/nm-errors.txt" || true
-exported=$(awk '{print $NF}' "$out/symbols.txt" | grep -E '^_mm_' | sed 's/^_//' | LC_ALL=C sort -u || true)
+exported=$(awk '{print $NF}' "$out/symbols.txt" | grep -E '^_(dm|mm)_' | sed 's/^_//' | LC_ALL=C sort -u || true)
 if [ -z "$expected" ] || [ "$expected" != "$exported" ]; then
 	echo "Header and exported symbols differ (header on the left, library on the right):" >&2
 	diff <(echo "$expected") <(echo "$exported") >&2 || true
