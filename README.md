@@ -91,11 +91,24 @@ rPGP leaves to the application.
   before its plaintext is read and a final tag over the length, so a
   truncated message fails. The whole plaintext is read before anything is
   returned: a failure releases nothing, not even chunks that authenticated.
+  GnuPG's default chunk is 4 MiB, so rPGP buffers about 8 MiB per such
+  decryption, whatever the message size.
   The option also enables GnuPG's v5 password packet (SKESK), which is unused:
   decryption here takes no message password.
 - Well-formed features rPGP does not implement are `unsupported` when rPGP
   says so with a typed error. BZip2 content (rPGP is built without it) and
   GnuPG EAX are reported by rPGP with untyped errors and read `malformed`.
+- Every AEAD error in SEIPD v2 is `not_integrity_protected`, including an
+  "unsupported AEAD algorithm": v2's cipher and AEAD octets are not
+  authenticated before rPGP uses them, so that error may come from an edited
+  header. Only in GnuPG's packet 20 is an AEAD cipher rPGP lacks (Camellia,
+  Twofish) `unsupported`: there rPGP first checks the cipher against the one
+  sealed in the public-key-encrypted session key.
+- **`unsupported` and `malformed` are unauthenticated verdicts.** The bytes
+  that produce them are not integrity-protected, so anyone on the path can
+  turn an authentic message into either. A caller must not present them as
+  more benign than `not_integrity_protected`, and must never suggest that
+  the sender resend the message unencrypted.
 - Compressed, and signed-then-compressed, content is decompressed.
 
 **Limits**
@@ -169,9 +182,13 @@ scripts/third_party_licenses.py --check                             # licences m
 scripts/build-xcframework.sh                                        # macOS: build/MishMailRPGP.xcframework.zip and .sha256
 ```
 
-The GnuPG interoperability tests run the `gpg` 2.4 on `PATH` (CI uses the
-one on the Ubuntu 24.04 runner image) in throwaway homes under `/tmp`, with
-keys generated at run time. Without it they fail; they are never skipped.
+The GnuPG interoperability tests need a Unix system and GnuPG 2.4.x on
+`PATH` (CI uses the one on the Ubuntu 24.04 runner image). They run it in
+throwaway homes under `/tmp`, with keys generated at run time. Without it
+they fail; they are never skipped. In tests rPGP is built without overflow
+checks, as in release, so that they exercise the shipped arithmetic: rPGP
+0.21.1 underflows (debug panic, release wrap then a bounds-check error) on
+an unknown AEAD octet in a SEIPD v2 header.
 
 ## Releasing
 

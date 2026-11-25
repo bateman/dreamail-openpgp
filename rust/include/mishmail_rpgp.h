@@ -6,6 +6,12 @@
 // call it off the main thread. `now_unix` is the caller's clock in seconds;
 // zero or negative is refused. Every result must be freed exactly once with
 // mm_pgp_free, which zeroes both buffers first.
+//
+// Decryption errors "unsupported" and "malformed" are unauthenticated: the
+// bytes that produce them are not integrity-protected, so anyone on the path
+// can turn an authentic message into either. Do not present them as more
+// benign than "not_integrity_protected", and never suggest resending the
+// message unencrypted.
 #ifndef MISHMAIL_RPGP_H
 #define MISHMAIL_RPGP_H
 

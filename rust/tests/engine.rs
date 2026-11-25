@@ -580,6 +580,29 @@ fn tampered_ciphertext_is_an_integrity_failure() {
     }
 }
 
+/// SEIPD v2's cipher and AEAD octets are not authenticated before rPGP
+/// uses them. An edited one must read as an integrity failure, never as
+/// something softer like `unsupported` (Camellia-256 and Twofish have the
+/// same key size as AES-256, so they reach the AEAD step; an unknown AEAD
+/// octet makes rPGP's nonce set-up fail).
+#[test]
+fn an_edited_seipd_v2_header_is_an_integrity_failure() {
+    let bob = generate("Bob <bob@example.net>", None);
+    let msg = encrypt_with(&bob, None, true, b"secret", None, false);
+    assert_eq!(packets(&msg)[1].1[..3], [2, 9, 2], "v2, AES-256, OCB");
+    for (what, at, value) in [("Camellia-256", 1, 13), ("Twofish", 1, 10), ("EAX", 2, 1),
+                              ("GCM", 2, 3), ("unknown AEAD", 2, 0x7f), ("no AEAD", 2, 0)] {
+        let bad: Vec<u8> = packets(&msg).into_iter().flat_map(|(tag, mut body)| {
+            if tag == 18 {
+                body[at] = value;
+            }
+            packet(tag, &body)
+        }).collect();
+        assert_eq!(engine::decrypt(&bad, &secret_armor(&bob), b"", b"", now()).map(|_| ()),
+                   Err(EngineError::NotIntegrityProtected), "{what}");
+    }
+}
+
 /// Packets of a binary message: (tag, body), new or old format headers.
 fn packets(mut data: &[u8]) -> Vec<(u8, Vec<u8>)> {
     let mut out = Vec::new();
@@ -641,9 +664,10 @@ fn a_message_without_integrity_protection_is_refused() {
 
 // MARK: - GnuPG interoperability
 
-/// A throwaway GnuPG home. GnuPG 2.4 is required (it is on CI's Ubuntu
-/// image): without it these tests fail, they are not skipped. The home is
-/// short and under /tmp because gpg-agent's socket path has a length limit.
+/// A throwaway GnuPG home. A Unix system and GnuPG 2.4.x are required (CI's
+/// Ubuntu image has both): without them these tests fail, they are not
+/// skipped. The home is short and under /tmp because gpg-agent's socket
+/// path has a length limit.
 struct Gpg {
     home: std::path::PathBuf,
 }
@@ -759,70 +783,76 @@ fn gnupg_ocb_message_decrypts() {
     }
 }
 
-/// Several small chunks (GnuPG's `--chunk-size 10`: 1 KiB), uncompressed,
-/// so ciphertext, chunk tags and the final tag are at known places.
-fn chunked_ocb(gpg: &Gpg, plaintext: &[u8]) -> Vec<u8> {
-    let msg = gpg.encrypt("bob@example.net", &["--compress-algo", "none", "--chunk-size", "10"], plaintext);
+/// Several small chunks (GnuPG's `--chunk-size 10`: 1 KiB), so every
+/// boundary is near.
+fn chunked_ocb(gpg: &Gpg, options: &[&str], plaintext: &[u8]) -> Vec<u8> {
+    let mut all = vec!["--chunk-size", "10"];
+    all.extend_from_slice(options);
+    let msg = gpg.encrypt("bob@example.net", &all, plaintext);
     assert_eq!(tags(&msg), [1, 20]);
     assert_eq!(packets(&msg)[1].1[3], 4, "1 KiB chunks");
     msg
 }
 
-/// Tampered ciphertext, a tampered chunk tag, a tampered final tag, and
-/// every way of cutting the message short: an error, never plaintext,
-/// not even the chunks that did authenticate.
+/// Every octet of the type 20 body flipped, and the body cut at every
+/// length (with and without the final tag put back): never plaintext,
+/// not even the chunks that authenticated. Past the version, cipher and
+/// mode octets everything is authenticated (chunk size and IV through the
+/// nonce and associated data), so a flip there is an integrity failure.
+/// Four shapes: plain, signed, signed and compressed, and one whose
+/// encrypted data fills its chunks exactly (no partial last chunk).
 #[test]
 fn gnupg_ocb_tampering_and_truncation_release_nothing() {
     let gpg = Gpg::new();
     let (bob, _) = gpg.generate("Bob <bob@example.net>");
-    let text = vec![b'x'; 4000];
-    let msg = chunked_ocb(&gpg, &text);
-    assert_eq!(engine::decrypt(&msg, &bob, b"", b"", now()).unwrap().plaintext.as_slice(), &text[..]);
-
-    let body_len = packets(&msg)[1].1.len();
-    // The literal data packet is a little over 4000 octets: four chunks.
+    let decrypt = |m: &[u8]| engine::decrypt(m, &bob, b"", b"", now());
+    let text = vec![b'x'; 2500];
+    let plain = ["--compress-algo", "none"];
+    let signed = ["--compress-algo", "none", "--sign", "--local-user", "bob@example.net"];
+    let compressed = ["--sign", "--local-user", "bob@example.net"];
     let chunk = 1024 + TAG;
-    let first_tag = OCB_HEADER + 1024;
-    let flips = [
-        ("ciphertext, first chunk", OCB_HEADER + 100),
-        ("ciphertext, second chunk", OCB_HEADER + chunk + 7),
-        ("first chunk's tag", first_tag + 3),
-        ("final tag", body_len - 1),
+    // The encrypted data is the literal packet, a few octets longer than the
+    // text: find a text length that makes it exactly two chunks.
+    let exact = (2000..2048)
+        .map(|n| chunked_ocb(&gpg, &plain, &vec![b'e'; n]))
+        .find(|m| (packets(m)[1].1.len() - OCB_HEADER - TAG) % chunk == 0)
+        .expect("a text length that fills two chunks exactly");
+    let shapes = [
+        ("plain", chunked_ocb(&gpg, &plain, &text)),
+        ("signed", chunked_ocb(&gpg, &signed, &text)),
+        ("signed and compressed", chunked_ocb(&gpg, &compressed, &[b"compressible ".repeat(400), text.clone()].concat())),
+        ("exact chunks", exact),
     ];
-    for (what, at) in flips {
-        let bad = edit_ocb(&msg, |b| b[at] ^= 0x40);
-        assert_eq!(engine::decrypt(&bad, &bob, b"", b"", now()).map(|_| ()),
-                   Err(EngineError::NotIntegrityProtected), "{what}");
-    }
-
-    // Cut short: every authenticated chunk is withheld too. With no
-    // ciphertext left at all there is nothing to authenticate: malformed.
-    let integrity = Err(EngineError::NotIntegrityProtected);
-    let cuts = [
-        ("final tag removed", body_len - TAG, false, integrity),
-        ("last octet removed", body_len - 1, false, integrity),
-        ("last chunk and final tag removed", OCB_HEADER + 3 * chunk, false, integrity),
-        ("last two chunks removed, final tag kept", OCB_HEADER + 2 * chunk, true, integrity),
-        ("cut inside the second chunk", OCB_HEADER + chunk + 500, false, integrity),
-        ("only the first chunk", OCB_HEADER + chunk, false, integrity),
-        ("header only", OCB_HEADER, false, Err(EngineError::Malformed)),
-    ];
-    for (what, keep, keep_final_tag, expected) in cuts {
-        let short = edit_ocb(&msg, |b| {
-            let final_tag = b[body_len - TAG..].to_vec();
-            b.truncate(keep);
-            if keep_final_tag {
-                b.extend_from_slice(&final_tag);
+    for (shape, msg) in &shapes {
+        assert!(decrypt(msg).is_ok(), "{shape}: the untouched message decrypts");
+        let body = &packets(msg)[1].1;
+        let body_len = body.len();
+        let final_tag = body[body_len - TAG..].to_vec();
+        for at in 0..body_len {
+            let out = decrypt(&edit_ocb(msg, |b| b[at] ^= 0x01)).map(|_| ());
+            if at >= 4 {
+                assert_eq!(out, Err(EngineError::NotIntegrityProtected), "{shape}: flip at {at} of {body_len}");
+            } else {
+                assert!(out.is_err(), "{shape}: flip at {at}");
             }
-        });
-        assert_eq!(engine::decrypt(&short, &bob, b"", b"", now()).map(|_| ()), expected, "{what}");
+        }
+        for keep in 0..body_len {
+            let out = decrypt(&edit_ocb(msg, |b| b.truncate(keep)));
+            assert!(out.is_err(), "{shape}: cut to {keep} of {body_len}");
+            if keep < body_len - TAG {
+                let out = decrypt(&edit_ocb(msg, |b| {
+                    b.truncate(keep);
+                    b.extend_from_slice(&final_tag);
+                }));
+                assert!(out.is_err(), "{shape}: cut to {keep} of {body_len}, final tag put back");
+            }
+        }
     }
 
     // The same octets as an armored message: same outcome.
-    let bad = edit_ocb(&msg, |b| b[OCB_HEADER + 100] ^= 0x40);
-    let armored = gpg.run(&["--enarmor"], &bad);
-    assert_eq!(engine::decrypt(&armored, &bob, b"", b"", now()).map(|_| ()),
-               Err(EngineError::NotIntegrityProtected));
+    let (_, msg) = &shapes[0];
+    let armored = gpg.run(&["--enarmor"], &edit_ocb(msg, |b| b[OCB_HEADER + 100] ^= 0x40));
+    assert_eq!(decrypt(&armored).map(|_| ()), Err(EngineError::NotIntegrityProtected));
 }
 
 /// Well-formed type 20 messages with a cipher rPGP has no OCB for
@@ -912,3 +942,4 @@ fn ffi_round_trip_clock_and_garbage() {
         mm_pgp_free(r);
     }
 }
+

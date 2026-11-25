@@ -655,7 +655,7 @@ pub fn decrypt(
     } else {
         Message::from_bytes(source)
     }
-    .map_err(|e| content_error(&e))?;
+    .map_err(|e| content_error(&e, false))?;
     let addressed = recipients(&parsed, &secrets)?;
 
     let password = Password::from(passphrase);
@@ -673,7 +673,7 @@ pub fn decrypt(
         if !(decrypted.is_compressed() || decrypted.is_signed()) {
             break;
         }
-        decrypted = decrypted.decompress().map_err(|e| content_error(&e))?;
+        decrypted = decrypted.decompress().map_err(|e| content_error(&e, addressed.gnupg_aead))?;
     }
     let mut plaintext = Zeroizing::new(Vec::new());
     // For SEIPD v1 rPGP checks the MDC before releasing plaintext; for SEIPD
@@ -683,15 +683,7 @@ pub fn decrypt(
     (&mut decrypted)
         .take(MAX_PLAINTEXT + 1)
         .read_to_end(&mut plaintext)
-        .map_err(|e| {
-            if io_integrity_failure(&e) {
-                EngineError::NotIntegrityProtected
-            } else if io_unsupported(&e) {
-                EngineError::Unsupported
-            } else {
-                EngineError::Malformed
-            }
-        })?;
+        .map_err(|e| content_error(&e.into(), addressed.gnupg_aead))?;
     if plaintext.len() as u64 > MAX_PLAINTEXT {
         return Err(EngineError::TooLarge);
     }
@@ -741,7 +733,8 @@ fn recipients(message: &Message<'_>, secrets: &[SignedSecretKey]) -> Result<Reci
     if esk.len() > MAX_SESSION_KEYS {
         return Err(EngineError::Malformed);
     }
-    let mut found = Recipients { addressed: false, locked: false, refused: false };
+    let mut found = Recipients { addressed: false, locked: false, refused: false,
+                                 gnupg_aead: matches!(edata, Edata::GnupgAeadData { .. }) };
     for pkesk in esk.iter().filter_map(|e| match e {
         Esk::PublicKeyEncryptedSessionKey(p) => Some(p),
         Esk::SymKeyEncryptedSessionKey(_) => None,
@@ -773,6 +766,8 @@ struct Recipients {
     locked: bool,
     /// One of our keys is a recipient, but only through a refused algorithm.
     refused: bool,
+    /// The container is GnuPG's OCB packet (type 20), not SEIPD.
+    gnupg_aead: bool,
 }
 
 impl Recipients {
@@ -788,68 +783,63 @@ impl Recipients {
 
 /// rPGP reports "no usable key" (including a wrong passphrase, which leaves
 /// the key unusable) as `MissingKey`; which one it was follows from whether
-/// a recipient key is ours and locked. A failed MDC or AEAD check is an
-/// integrity failure.
+/// a recipient key is ours and locked.
 fn map_decrypt_error(error: PgpError, found: Recipients) -> EngineError {
     match error {
         PgpError::MissingKey if !found.addressed => EngineError::NoSecretKey,
         PgpError::MissingKey if found.locked => EngineError::PassphraseRequired,
-        _ => content_error(&error),
+        _ => content_error(&error, found.gnupg_aead),
     }
 }
 
-/// Errors while parsing, or reading decrypted content (decompression reads
-/// it): an integrity failure, something well-formed that rPGP does not
-/// implement, or else malformed input.
-fn content_error(error: &PgpError) -> EngineError {
-    if is_integrity_failure(error) {
-        EngineError::NotIntegrityProtected
-    } else if is_unsupported(error) {
-        EngineError::Unsupported
-    } else {
-        EngineError::Malformed
+/// Errors while parsing, decrypting, or reading decrypted content
+/// (decompression reads it).
+///
+/// - A failed MDC, and every AEAD error, is an integrity failure. In SEIPD
+///   v2 the cipher and AEAD octets of the header are not authenticated
+///   before use, so an AEAD "unsupported algorithm" there may be an edited
+///   header: it must not read as anything softer.
+/// - The one exception is GnuPG's OCB packet (`gnupg_aead`): rPGP checks
+///   its cipher against the one inside the public-key-encrypted session key
+///   before decrypting, so an AEAD cipher rPGP has no implementation for
+///   (Camellia, Twofish) is what the sender used: `unsupported`.
+/// - A typed `Unsupported`/`Unimplemented` error from rPGP is `unsupported`;
+///   anything else is `malformed`. Neither verdict is authenticated.
+fn content_error(error: &PgpError, gnupg_aead: bool) -> EngineError {
+    use pgp::crypto::aead::Error as Aead;
+    match cause(error) {
+        Cause::Mdc => EngineError::NotIntegrityProtected,
+        Cause::Aead(Aead::UnsupporedAlgorithm { .. }) if gnupg_aead => EngineError::Unsupported,
+        Cause::Aead(_) => EngineError::NotIntegrityProtected,
+        Cause::Unsupported => EngineError::Unsupported,
+        Cause::Other => EngineError::Malformed,
     }
 }
 
-/// MDC and AEAD failures, also when rPGP wraps them in an I/O error (it
-/// does when the check happens while reading the decrypted stream).
-fn is_integrity_failure(error: &PgpError) -> bool {
+enum Cause<'a> {
+    Mdc,
+    Aead(&'a pgp::crypto::aead::Error),
+    Unsupported,
+    Other,
+}
+
+/// What an rPGP error is about, also when rPGP wraps it in an I/O error (it
+/// does when a check happens while reading the decrypted stream).
+fn cause(error: &PgpError) -> Cause<'_> {
     match error {
-        PgpError::MdcError => true,
-        PgpError::Aead { source } => aead_integrity_failure(source),
-        PgpError::IO { source, .. } => io_integrity_failure(source),
-        _ => false,
+        PgpError::MdcError => Cause::Mdc,
+        PgpError::Aead { source } => Cause::Aead(source),
+        PgpError::Unsupported { .. } | PgpError::Unimplemented { .. } => Cause::Unsupported,
+        PgpError::IO { source, .. } => {
+            let Some(inner) = source.get_ref() else { return Cause::Other };
+            if let Some(e) = inner.downcast_ref::<PgpError>() {
+                cause(e)
+            } else if let Some(e) = inner.downcast_ref::<pgp::crypto::aead::Error>() {
+                Cause::Aead(e)
+            } else {
+                Cause::Other
+            }
+        }
+        _ => Cause::Other,
     }
-}
-
-fn io_integrity_failure(error: &std::io::Error) -> bool {
-    let Some(inner) = error.get_ref() else { return false };
-    inner.downcast_ref::<PgpError>().is_some_and(is_integrity_failure)
-        || inner.downcast_ref::<pgp::crypto::aead::Error>().is_some_and(aead_integrity_failure)
-}
-
-/// Only a tag that does not verify is an integrity failure; an AEAD mode
-/// or cipher rPGP does not implement is `unsupported` (see `aead_unsupported`).
-fn aead_integrity_failure(error: &pgp::crypto::aead::Error) -> bool {
-    matches!(error, pgp::crypto::aead::Error::Decrypt { .. })
-}
-
-fn aead_unsupported(error: &pgp::crypto::aead::Error) -> bool {
-    matches!(error, pgp::crypto::aead::Error::UnsupporedAlgorithm { .. })
-}
-
-/// An AEAD mode or cipher rPGP does not implement, also inside an I/O error.
-fn is_unsupported(error: &PgpError) -> bool {
-    match error {
-        PgpError::Unsupported { .. } | PgpError::Unimplemented { .. } => true,
-        PgpError::Aead { source } => aead_unsupported(source),
-        PgpError::IO { source, .. } => io_unsupported(source),
-        _ => false,
-    }
-}
-
-fn io_unsupported(error: &std::io::Error) -> bool {
-    let Some(inner) = error.get_ref() else { return false };
-    inner.downcast_ref::<PgpError>().is_some_and(is_unsupported)
-        || inner.downcast_ref::<pgp::crypto::aead::Error>().is_some_and(aead_unsupported)
 }

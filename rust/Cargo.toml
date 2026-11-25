@@ -37,3 +37,11 @@ smallvec = "1.10.0"
 # takes seconds, not minutes. Release builds are unaffected.
 [profile.dev.package."*"]
 opt-level = 2
+
+# rPGP with release arithmetic in tests, so that they check what ships.
+# rPGP 0.21.1 computes `nonce_size() - 8` for a SEIPD v2 header's AEAD
+# octet before checking it: an unknown value underflows. With overflow
+# checks (debug) that panics; in release it wraps, the bounds check after
+# it fails, and decryption reports an AEAD error. The tests cover that path.
+[profile.dev.package.pgp]
+overflow-checks = false
