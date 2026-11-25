@@ -3,7 +3,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use mishmail_rpgp::engine::{self, EngineError, SignatureResult, Validity};
+use dreamail_rpgp::engine::{self, EngineError, SignatureResult, Validity};
 use pgp::composed::{
     ArmorOptions, CleartextSignedMessage, DetachedSignature, EncryptionCaps, KeyType,
     MessageBuilder, SecretKeyParamsBuilder, SignedPublicKey, SignedSecretKey, SubkeyParamsBuilder,
@@ -677,7 +677,7 @@ impl Gpg {
         use std::sync::atomic::{AtomicUsize, Ordering};
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let home = std::path::PathBuf::from(format!(
-            "/tmp/mmgpg-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+            "/tmp/dmgpg-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir(&home).unwrap();
         #[cfg(unix)]
@@ -903,43 +903,43 @@ fn gnupg_seipd_v1_message_decrypts_as_before() {
 
 #[test]
 fn ffi_round_trip_clock_and_garbage() {
-    use mishmail_rpgp::{mm_pgp_free, mm_pgp_import_public, mm_pgp_inspect_keys, mm_pgp_verify_detached};
+    use dreamail_rpgp::{dm_pgp_free, dm_pgp_import_public, dm_pgp_inspect_keys, dm_pgp_verify_detached};
     let alice = generate("Alice <alice@example.org>", None);
     let certs = public_armor(&alice);
     let data = b"payload";
     let sig = detached(&alice, "", data);
     let unix = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs() as i64;
-    let json = |r: &mishmail_rpgp::MMResult| unsafe {
+    let json = |r: &dreamail_rpgp::DMResult| unsafe {
         std::str::from_utf8(std::slice::from_raw_parts(r.json.ptr, r.json.len)).unwrap().to_owned()
     };
     unsafe {
-        let r = mm_pgp_verify_detached(data.as_ptr(), data.len(), sig.as_ptr(), sig.len(),
+        let r = dm_pgp_verify_detached(data.as_ptr(), data.len(), sig.as_ptr(), sig.len(),
                                        certs.as_ptr(), certs.len(), unix);
         assert!(json(&r).contains("\"ok\":true") && json(&r).contains("\"status\":\"good\""), "{}", json(&r));
         assert!(r.data.ptr.is_null());
-        mm_pgp_free(r);
+        dm_pgp_free(r);
 
         // No clock: refused, not read as 1970 (which would hide every expiry).
         for bad in [0, -1] {
-            let r = mm_pgp_verify_detached(data.as_ptr(), data.len(), sig.as_ptr(), sig.len(),
+            let r = dm_pgp_verify_detached(data.as_ptr(), data.len(), sig.as_ptr(), sig.len(),
                                            certs.as_ptr(), certs.len(), bad);
             assert_eq!(json(&r), r#"{"error":"internal","ok":false}"#);
-            mm_pgp_free(r);
+            dm_pgp_free(r);
         }
 
-        let r = mm_pgp_inspect_keys(b"\xff\xfe".as_ptr(), 2, unix);
+        let r = dm_pgp_inspect_keys(b"\xff\xfe".as_ptr(), 2, unix);
         assert_eq!(json(&r), r#"{"error":"malformed","ok":false}"#);
-        mm_pgp_free(r);
+        dm_pgp_free(r);
 
         let secret = secret_armor(&alice);
-        let r = mm_pgp_import_public(secret.as_ptr(), secret.len(), unix);
+        let r = dm_pgp_import_public(secret.as_ptr(), secret.len(), unix);
         assert!(json(&r).contains("\"validity\":\"valid\""), "{}", json(&r));
         let stored = std::slice::from_raw_parts(r.data.ptr, r.data.len);
         assert!(!String::from_utf8_lossy(stored).contains("PRIVATE"));
-        mm_pgp_free(r);
+        dm_pgp_free(r);
 
-        let r = mm_pgp_verify_detached(std::ptr::null(), 0, std::ptr::null(), 0, std::ptr::null(), 0, unix);
-        mm_pgp_free(r);
+        let r = dm_pgp_verify_detached(std::ptr::null(), 0, std::ptr::null(), 0, std::ptr::null(), 0, unix);
+        dm_pgp_free(r);
     }
 }
 

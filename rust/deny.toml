@@ -9,7 +9,7 @@ ignore = [
     # rsa 0.9.10, "Marvin Attack: potential key recovery through timing
     # sidechannels". No fixed 0.9 release exists; rPGP depends on it. It
     # needs a timing oracle on RSA decryption: an attacker who can measure
-    # how long MishMail takes to decrypt many chosen messages. Recorded in
+    # how long DreaMail takes to decrypt many chosen messages. Recorded in
     # the README's known limits; revisit when rsa ships a fix.
     { id = "RUSTSEC-2023-0071", reason = "no fixed rsa 0.9 release; needs a decryption timing oracle; see README" },
     # crypto-bigint 0.5.5, "Multiple timing variability issues in operations

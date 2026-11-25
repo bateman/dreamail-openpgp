@@ -1,4 +1,4 @@
-module MishMailRPGP {
-    header "mishmail_rpgp.h"
+module DreaMailRPGP {
+    header "dreamail_rpgp.h"
     export *
 }

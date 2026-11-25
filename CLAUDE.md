@@ -1,7 +1,7 @@
 # Project instructions
 
-This repository is part of MishMail (https://github.com/bateman/mishmail): the
-OpenPGP engine it links as a prebuilt `binaryTarget`. MishMail's `CLAUDE.md`
+This repository is part of DreaMail (https://github.com/bateman/dreamail): the
+OpenPGP engine it links as a prebuilt `binaryTarget`. DreaMail's `CLAUDE.md`
 applies here too: communication style, review tiers, the owner writes in
 Italian (answer in Italian; code, commits and documents stay in English).
 

@@ -1,11 +1,11 @@
 [package]
-name = "mishmail-rpgp"
+name = "dreamail-rpgp"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT"
 publish = false
-description = "C ABI over rPGP for MishMail: verify, decrypt and inspect keys (step 4B, scope B)"
+description = "C ABI over rPGP for DreaMail: verify, decrypt and inspect keys (step 4B, scope B)"
 
 [lib]
 crate-type = ["staticlib", "rlib"]
