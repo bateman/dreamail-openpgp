@@ -1,0 +1,23 @@
+# cargo-deny configuration: only advisories are enforced here (licences are
+# checked by scripts/third_party_licenses.py, sources by Cargo.lock).
+[graph]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+
+[advisories]
+# Every advisory fails the check unless listed here with a reason.
+ignore = [
+    # rsa 0.9.10, "Marvin Attack: potential key recovery through timing
+    # sidechannels". No fixed 0.9 release exists; rPGP depends on it. It
+    # needs a timing oracle on RSA decryption: an attacker who can measure
+    # how long MishMail takes to decrypt many chosen messages. Recorded in
+    # the README's known limits; revisit when rsa ships a fix.
+    { id = "RUSTSEC-2023-0071", reason = "no fixed rsa 0.9 release; needs a decryption timing oracle; see README" },
+    # crypto-bigint 0.5.5, "Multiple timing variability issues in operations
+    # intended to be constant-time". Fixed only in 0.7.6; elliptic-curve 0.13
+    # (NIST P-curves, used by rPGP) and cx448 require 0.5, so it cannot be
+    # updated from here. Exploiting it needs local timing or
+    # microarchitectural observation of secret-key operations on this Mac.
+    # Recorded in the README's known limits; revisit with rPGP's next
+    # elliptic-curve upgrade.
+    { id = "RUSTSEC-2026-0387", reason = "fix only in crypto-bigint 0.7; rPGP's elliptic-curve 0.13 needs 0.5; local side channel; see README" },
+]

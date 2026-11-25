@@ -1,0 +1,175 @@
+# dreamail-openpgp
+
+The OpenPGP engine of MishMail: [rPGP](https://github.com/rpgp/rpgp) behind a
+small C interface, shipped as a prebuilt, checksummed `MishMailRPGP.xcframework`
+for macOS (arm64 and x86_64) that SwiftPM fetches as a `binaryTarget`.
+
+Scope B (owner's decision): verify signatures (PGP/MIME detached and
+cleartext), decrypt, read and import keys. Nothing here signs, encrypts or
+generates keys. The Swift side (`RPGPEngine`, conforming to MishMail's
+`OpenPGPEngine`) and the `MISHMAIL_PGP` build switch live in MishMail.
+
+## Why rPGP
+
+No ready-made Swift or Objective-C library is adequate (survey of 25 November
+2026, MishMail PR #56):
+
+- ObjectivePGP is free only for non-commercial use, is RFC 4880 only, and
+  vendors OpenSSL 1.1.1h, which has been out of support since 2023.
+- The pure-Swift packages are months old, unaudited and have a single author.
+- Sequoia is LGPL and its C API is deprecated.
+- GopenPGP puts the Go runtime in the app.
+
+rPGP is MIT or Apache-2.0, implements RFC 9580 and 4880, and has been audited
+(Radically Open Security 2024, ETH 2024, Include Security 2019; see its
+[SECURITY_STATUS](https://github.com/rpgp/rpgp/blob/56a40045e1d7516e5ec02244ea2884c92bece45f/docs/SECURITY_STATUS.md)).
+
+## What is pinned
+
+| | |
+|---|---|
+| rPGP | crate `pgp` `=0.21.1` (crates.io, 11 November 2026), MIT OR Apache-2.0 |
+| rPGP crate checksum (crates.io, also in `rust/Cargo.lock`) | `c7275cbf21850789239e1be05d9a887e6bba6aa8085a81be09ca021c8379baef` |
+| rPGP git tag `v0.21.1` | tag object `953a14294011e564ff2444f8b8574cdfba8d19de`, commit `56a40045e1d7516e5ec02244ea2884c92bece45f` |
+| Every other crate | `rust/Cargo.lock` (152 packages including test-only ones; 145 linked into the macOS library), fetched with `--locked`, built `--offline`; all under permissive licences; no C code is compiled |
+| Rust compiler | `rust/rust-toolchain.toml`: 1.97.0 |
+| Default features | off (`default-features = false`: no bzip2) |
+| GitHub Actions | pinned by full commit SHA |
+| cargo-deny (advisory check) | 0.20.2, installed with `--locked` |
+
+## Policy (`rust/src/engine.rs`)
+
+Everything cryptographic is rPGP's. What this crate decides is policy, which
+rPGP leaves to the application.
+
+**Certificates**
+- Only self-signatures count. Each must verify with an accepted hash, and at
+  least one user ID must be bound; otherwise the key is `broken`.
+- Third-party certifications are ignored. rPGP's own `verify_bindings` would
+  reject a key that carries one.
+- A user ID revoked by its owner is not listed.
+- Every key revocation is tried against the primary key, whatever issuer it
+  names.
+- Expiry is the earliest among the newest self-signature of each bound user
+  ID and the newest direct-key signature.
+
+**Signing keys**
+- The primary key signs data only if its newest self-signature carries the
+  sign flag.
+- A subkey signs data only if its newest verifying binding carries the sign
+  flag, it is not revoked, and its own expiry has not passed.
+- A signature by a revoked or expired key or subkey, or an expired signature,
+  is `key_not_valid`.
+- A signature created before its key, or more than 10 minutes in the future,
+  is `bad`.
+
+**Hashes**
+- Data signatures with MD5, RIPEMD-160 or SHA-1 are `unsupported`.
+- Self-signatures and bindings with MD5 or RIPEMD-160 make the key `broken`.
+- SHA-1 is accepted in self-signatures and bindings: many long-lived keys
+  still carry SHA-1 self-signatures, and rPGP checks them with
+  collision-detecting SHA-1 (`sha1-checked`).
+
+**Algorithms**
+- Ed448 and X448 are refused (`unsupported`; keys are not imported, messages
+  only to such keys are not decrypted). rPGP implements them with `cx448`,
+  whose README says it has not been audited or reviewed and which ships no
+  licence text. It is a mandatory dependency of rPGP 0.21.1: no feature flag
+  removes it from the build, so the refusal is policy only. Reversible
+  decision of the owner.
+
+**Decryption**
+- Legacy SED (no integrity check) is refused before decrypting:
+  `not_integrity_protected`.
+- A failed MDC (SEIPD v1, checked before any plaintext is released) or AEAD
+  tag (SEIPD v2) is `not_integrity_protected` too.
+- Compressed, and signed-then-compressed, content is decompressed.
+
+**Limits**
+- Input: 48 MiB.
+- Plaintext after decompression: 64 MiB, which stops compression bombs.
+- 16 signatures per message, with duplicates removed.
+- 32 session-key packets.
+
+**Import**
+- Public import stores only certificates the engine parsed and checked,
+  re-serialized; never the bytes handed in, and never secret material.
+- Secret import is a separate call: valid, supported keys only, still under
+  their own passphrase.
+
+## Memory, logging, threads
+
+- **Wiping.** Result buffers are zeroed when freed (`mm_pgp_free`, `zeroize`);
+  plaintext is held in `Zeroizing` buffers inside the crate. Copies the caller
+  makes (Swift `Data` of the passphrase, secret keys or plaintext) cannot be
+  wiped reliably; keep them short-lived.
+- **Logging.** Nothing logs. rPGP logs packet details at debug level through
+  the `log` crate: never install a `log` logger in a process that links this
+  library.
+- **Panics.** A panic is caught at the boundary, reported as `internal`, and
+  not printed: the library replaces the default panic hook with a silent one.
+- **Threads.** Calls are synchronous and can take a while. Call them off the
+  main thread, and off Swift's cooperative pool.
+- **Clock.** `now_unix` comes from the caller; zero or negative is refused,
+  rather than read as 1970, which would hide every expiry.
+
+## Known limits
+
+- **Timing side channels:**
+  - `rsa` 0.9.10, RUSTSEC-2023-0071 (Marvin): needs a timing oracle on RSA
+    decryption. No fixed 0.9 release exists.
+  - `crypto-bigint` 0.5.5, RUSTSEC-2026-0387: the fix is only in 0.7.6, and
+    rPGP's `elliptic-curve` 0.13 needs 0.5. Exploiting it needs local timing or
+    microarchitectural observation of secret-key operations.
+
+  Both are allow-listed in `rust/deny.toml` with their reason. Every other
+  advisory fails CI.
+- **Legacy algorithms** compiled into rPGP, with no feature to remove them,
+  are refused by the policy above.
+- **Not evaluated:** designated revokers, third-party certifications (no web
+  of trust), and signature creation time against a key's past validity
+  windows. An old message signed by a key that has since expired reads
+  `key_not_valid`.
+- **Reproducibility.** The release workflow builds twice on one runner and
+  refuses to publish if the zips differ. Whether two different Macs produce
+  the same zip has not been verified. The checksum is committed with each
+  release, and SwiftPM verifies it on download.
+
+## Licences
+
+- This repository: MIT (`LICENSE`).
+- Linked crates: `THIRD_PARTY_LICENSES.md` lists every crate linked into the
+  library and its licence texts. It is generated by
+  `scripts/third_party_licenses.py` from `rust/Cargo.lock`, checked in CI, and
+  attached to every release.
+- Crates that publish no licence file: their texts come from upstream, see
+  `licenses/README.md`. `cx448` has none anywhere.
+- MIT, Apache-2.0 and BSD require their notices in redistributed binaries; how
+  a public MishMail release ships them is decided at distribution time.
+
+## Build and test
+
+```sh
+(cd rust && cargo fetch --locked && cargo test --locked --offline)   # any platform
+(cd rust && cargo deny check advisories)                            # needs cargo-deny 0.20.2
+scripts/third_party_licenses.py --check                             # licences match Cargo.lock
+scripts/build-xcframework.sh                                        # macOS: build/MishMailRPGP.xcframework.zip and .sha256
+```
+
+## Releasing
+
+1. Run the **Release** workflow with a version, e.g. `0.1.0`. It checks
+   licences and advisories, builds the zip twice, refuses to publish if the
+   two differ, and creates release `v0.1.0` with the zip, its `.sha256` and
+   `THIRD_PARTY_LICENSES.md`.
+2. In one commit, set `version` and `checksum` in `Package.swift` to that
+   release. The checksum is in the `.sha256` file and the release notes.
+   Cross-check it with a local `scripts/build-xcframework.sh` on another Mac.
+3. MishMail pins **that commit** in `project.yml`, the same way as GRDB:
+   ```yaml
+   packages:
+     MishMailRPGP:
+       url: https://github.com/bateman/dreamail-openpgp
+       revision: <40-hex commit from step 2>
+   ```
+   SwiftPM refuses a downloaded zip whose SHA-256 differs from `checksum`.
