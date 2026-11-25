@@ -8,6 +8,14 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    ignore:
+      # Test-only crates that must stay on the versions rPGP itself uses
+      # (its key generation takes a rand 0.8 generator). Revisit when the
+      # pgp crate is upgraded.
+      - dependency-name: rand
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: smallvec
+        update-types: ["version-update:semver-major"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
