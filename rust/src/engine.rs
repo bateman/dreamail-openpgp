@@ -1,4 +1,4 @@
-//! Safe Rust side of MishMail's OpenPGP engine (scope B): verify detached
+//! Safe Rust side of DreaMail's OpenPGP engine (scope B): verify detached
 //! and cleartext signatures, decrypt, and read keys. Stateless: every call
 //! receives the certificates and secret keys it may use; the app stores them
 //! (Keychain, encrypted database), not this crate.

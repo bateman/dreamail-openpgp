@@ -91,17 +91,17 @@ jobs:
           scripts/build-xcframework.sh "$RUNNER_TEMP/a"
           rm -rf rust/target
           scripts/build-xcframework.sh "$RUNNER_TEMP/b"
-          if ! cmp "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip" "$RUNNER_TEMP/b/MishMailRPGP.xcframework.zip"; then
+          if ! cmp "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip" "$RUNNER_TEMP/b/DreaMailRPGP.xcframework.zip"; then
             echo "The two builds differ: not reproducible." >&2
             exit 1
           fi
-          cat "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip.sha256"
+          cat "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip.sha256"
 
       # The library must link with Apple's linker for both architectures and
       # answer a call. The runner is arm64, so only that binary is run.
       - name: Link and call the library
         run: |
-          lib="$RUNNER_TEMP/a/universal/libmishmail_rpgp.a"
+          lib="$RUNNER_TEMP/a/universal/libdreamail_rpgp.a"
           for arch in arm64 x86_64; do
             clang -arch "$arch" -mmacosx-version-min=14.0 -Wall -Werror \
               -I rust/include scripts/smoke/link_check.c "$lib" \

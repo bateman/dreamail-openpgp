@@ -62,16 +62,16 @@ jobs:
           scripts/build-xcframework.sh "$RUNNER_TEMP/a"
           rm -rf rust/target
           scripts/build-xcframework.sh "$RUNNER_TEMP/b"
-          if ! cmp "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip" "$RUNNER_TEMP/b/MishMailRPGP.xcframework.zip"; then
+          if ! cmp "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip" "$RUNNER_TEMP/b/DreaMailRPGP.xcframework.zip"; then
             echo "The two builds differ: not reproducible, not publishing." >&2
             exit 1
           fi
           {
-            echo "### MishMailRPGP.xcframework.zip"
+            echo "### DreaMailRPGP.xcframework.zip"
             echo
-            echo "SHA-256: \`$(cut -d' ' -f1 "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip.sha256")\`"
+            echo "SHA-256: \`$(cut -d' ' -f1 "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip.sha256")\`"
             echo
-            echo "Size: $(du -h "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip" | cut -f1)"
+            echo "Size: $(du -h "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip" | cut -f1)"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish the release
@@ -79,10 +79,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
-          sum=$(cut -d' ' -f1 "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip.sha256")
+          sum=$(cut -d' ' -f1 "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip.sha256")
           gh release create "v$VERSION" \
-            "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip" \
-            "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip.sha256" \
+            "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip" \
+            "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip.sha256" \
             THIRD_PARTY_LICENSES.md \
             --target "$GITHUB_SHA" --title "v$VERSION" \
-            --notes "MishMailRPGP.xcframework.zip SHA-256: $sum (binaryTarget checksum). Built from $GITHUB_SHA."
+            --notes "DreaMailRPGP.xcframework.zip SHA-256: $sum (binaryTarget checksum). Built from $GITHUB_SHA."

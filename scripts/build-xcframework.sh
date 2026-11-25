@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds MishMailRPGP.xcframework (rust/ over rPGP) for macOS, arm64 +
+# Builds DreaMailRPGP.xcframework (rust/ over rPGP) for macOS, arm64 +
 # x86_64, zips it, and writes the SHA-256 that Package.swift's binaryTarget
 # pins.
 #
@@ -17,7 +17,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 crate="$root/rust"
 out=${1:-"$root/build"}
-name=MishMailRPGP
+name=DreaMailRPGP
 
 if [ "$(uname -s)" != "Darwin" ]; then
 	echo "This builds an Apple xcframework: run it on macOS." >&2
@@ -47,21 +47,21 @@ done
 rm -rf "$out"
 mkdir -p "$out/universal" "$out/headers"
 lipo -create \
-	target/aarch64-apple-darwin/release/libmishmail_rpgp.a \
-	target/x86_64-apple-darwin/release/libmishmail_rpgp.a \
-	-output "$out/universal/libmishmail_rpgp.a"
+	target/aarch64-apple-darwin/release/libdreamail_rpgp.a \
+	target/x86_64-apple-darwin/release/libdreamail_rpgp.a \
+	-output "$out/universal/libdreamail_rpgp.a"
 
 # Every function the header declares must be exported, and nothing else
 # named mm_ may be.
 # A step that finds nothing must say so, not end the script silently
 # (grep exits 1 on no match, which `set -e -o pipefail` turns into an exit).
-expected=$(grep -oE 'mm_pgp_[a-z_]+\(' include/mishmail_rpgp.h | tr -d '(' | LC_ALL=C sort -u || true)
+expected=$(grep -oE 'dm_pgp_[a-z_]+\(' include/dreamail_rpgp.h | tr -d '(' | LC_ALL=C sort -u || true)
 # Xcode's nm exits non-zero on this library: the Rust standard library's
 # objects carry LLVM bitcode from a newer LLVM than Xcode's, which nm tries
 # to read and cannot ("Unknown attribute kind"). The machine code and the
 # symbol table next to it are fine, so the exit status is not used: the
 # comparison below decides, and nm's messages are shown only if it fails.
-nm -gU "$out/universal/libmishmail_rpgp.a" > "$out/symbols.txt" 2> "$out/nm-errors.txt" || true
+nm -gU "$out/universal/libdreamail_rpgp.a" > "$out/symbols.txt" 2> "$out/nm-errors.txt" || true
 exported=$(awk '{print $NF}' "$out/symbols.txt" | grep -E '^_mm_' | sed 's/^_//' | LC_ALL=C sort -u || true)
 if [ -z "$expected" ] || [ "$expected" != "$exported" ]; then
 	echo "Header and exported symbols differ (header on the left, library on the right):" >&2
@@ -69,15 +69,15 @@ if [ -z "$expected" ] || [ "$expected" != "$exported" ]; then
 	echo "nm reported $(wc -l < "$out/symbols.txt" | tr -d ' ') lines; the first of its messages:" >&2
 	head -20 "$out/nm-errors.txt" >&2
 	echo "Members of the library:" >&2
-	lipo -info "$out/universal/libmishmail_rpgp.a" >&2 || true
-	ar -t target/aarch64-apple-darwin/release/libmishmail_rpgp.a | head -20 >&2 || true
+	lipo -info "$out/universal/libdreamail_rpgp.a" >&2 || true
+	ar -t target/aarch64-apple-darwin/release/libdreamail_rpgp.a | head -20 >&2 || true
 	exit 1
 fi
 rm -f "$out/symbols.txt" "$out/nm-errors.txt"
 
-cp include/mishmail_rpgp.h include/module.modulemap "$out/headers/"
+cp include/dreamail_rpgp.h include/module.modulemap "$out/headers/"
 xcodebuild -create-xcframework \
-	-library "$out/universal/libmishmail_rpgp.a" -headers "$out/headers" \
+	-library "$out/universal/libdreamail_rpgp.a" -headers "$out/headers" \
 	-output "$out/$name.xcframework"
 
 find "$out/$name.xcframework" -exec touch -h -t 198001010000 {} +
@@ -88,5 +88,5 @@ sum=$(shasum -a 256 "$out/$name.xcframework.zip" | cut -d' ' -f1)
 echo "$sum  $name.xcframework.zip" > "$out/$name.xcframework.zip.sha256"
 echo "Built $out/$name.xcframework.zip"
 echo "Size: $(du -h "$out/$name.xcframework.zip" | cut -f1) zipped," \
-	"$(du -h "$out/universal/libmishmail_rpgp.a" | cut -f1) static library (before linking)"
+	"$(du -h "$out/universal/libdreamail_rpgp.a" | cut -f1) static library (before linking)"
 echo "SHA-256 (binaryTarget checksum): $sum"

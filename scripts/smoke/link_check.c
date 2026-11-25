@@ -4,11 +4,11 @@
 // engine's behaviour is covered by the Rust tests.
 #include <stdio.h>
 #include <string.h>
-#include "mishmail_rpgp.h"
+#include "dreamail_rpgp.h"
 
 int main(void) {
     const uint8_t empty[1] = {0};
-    MMResult result = mm_pgp_inspect_keys(empty, 0, 1700000000);
+    DMResult result = dm_pgp_inspect_keys(empty, 0, 1700000000);
     if (result.json.ptr == NULL || result.json.len == 0) {
         fprintf(stderr, "no JSON answer\n");
         return 1;
@@ -18,6 +18,6 @@ int main(void) {
         return 1;
     }
     printf("%.*s\n", (int)result.json.len, (const char *)result.json.ptr);
-    mm_pgp_free(result);
+    dm_pgp_free(result);
     return 0;
 }

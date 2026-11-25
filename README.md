@@ -1,18 +1,23 @@
 # dreamail-openpgp
 
-The OpenPGP engine of MishMail: [rPGP](https://github.com/rpgp/rpgp) behind a
-small C interface, shipped as a prebuilt, checksummed `MishMailRPGP.xcframework`
+The OpenPGP engine of DreaMail: [rPGP](https://github.com/rpgp/rpgp) behind a
+small C interface, shipped as a prebuilt, checksummed `DreaMailRPGP.xcframework`
 for macOS (arm64 and x86_64) that SwiftPM fetches as a `binaryTarget`.
 
 Scope B (owner's decision): verify signatures (PGP/MIME detached and
 cleartext), decrypt, read and import keys. Nothing here signs, encrypts or
-generates keys. The Swift side (`RPGPEngine`, conforming to MishMail's
-`OpenPGPEngine`) and the `MISHMAIL_PGP` build switch live in MishMail.
+generates keys. The Swift side (`RPGPEngine`, conforming to DreaMail's
+`OpenPGPEngine`) and the `DREAMAIL_PGP` build switch live in DreaMail.
+
+Releases up to v0.1.1 were published under the app's former name, MishMail:
+`MishMailRPGP.xcframework.zip`, header `mishmail_rpgp.h`, symbols `mm_pgp_*`
+and types `MMResult`/`MMBuffer`. From v0.2.0 they are `DreaMailRPGP`,
+`dreamail_rpgp.h`, `dm_pgp_*` and `DMResult`/`DMBuffer` (an ABI break).
 
 ## Why rPGP
 
 No ready-made Swift or Objective-C library is adequate (survey of 25 November
-2026, MishMail PR #56):
+2026, PR #56 in the app repository, then named MishMail):
 
 - ObjectivePGP is free only for non-commercial use, is RFC 4880 only, and
   vendors OpenSSL 1.1.1h, which has been out of support since 2023.
@@ -125,7 +130,7 @@ rPGP leaves to the application.
 
 ## Memory, logging, threads
 
-- **Wiping.** Result buffers are zeroed when freed (`mm_pgp_free`, `zeroize`);
+- **Wiping.** Result buffers are zeroed when freed (`dm_pgp_free`, `zeroize`);
   plaintext is held in `Zeroizing` buffers inside the crate. Copies the caller
   makes (Swift `Data` of the passphrase, secret keys or plaintext) cannot be
   wiped reliably; keep them short-lived.
@@ -171,7 +176,7 @@ rPGP leaves to the application.
 - Crates that publish no licence file: their texts come from upstream, see
   `licenses/README.md`. `cx448` has none anywhere.
 - MIT, Apache-2.0 and BSD require their notices in redistributed binaries; how
-  a public MishMail release ships them is decided at distribution time.
+  a public DreaMail release ships them is decided at distribution time.
 
 ## Build and test
 
@@ -179,7 +184,7 @@ rPGP leaves to the application.
 (cd rust && cargo fetch --locked && cargo test --locked --offline)   # any platform; needs gpg 2.4 on PATH
 (cd rust && cargo deny check advisories)                            # needs cargo-deny 0.20.2
 scripts/third_party_licenses.py --check                             # licences match Cargo.lock
-scripts/build-xcframework.sh                                        # macOS: build/MishMailRPGP.xcframework.zip and .sha256
+scripts/build-xcframework.sh                                        # macOS: build/DreaMailRPGP.xcframework.zip and .sha256
 ```
 
 The GnuPG interoperability tests need a Unix system and GnuPG 2.4.x on
@@ -199,10 +204,10 @@ an unknown AEAD octet in a SEIPD v2 header.
 2. In one commit, set `version` and `checksum` in `Package.swift` to that
    release. The checksum is in the `.sha256` file and the release notes.
    Cross-check it with a local `scripts/build-xcframework.sh` on another Mac.
-3. MishMail pins **that commit** in `project.yml`, the same way as GRDB:
+3. DreaMail pins **that commit** in `project.yml`, the same way as GRDB:
    ```yaml
    packages:
-     MishMailRPGP:
+     DreaMailRPGP:
        url: https://github.com/bateman/dreamail-openpgp
        revision: <40-hex commit from step 2>
    ```
