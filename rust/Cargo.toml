@@ -19,9 +19,13 @@ serde_json = "1"
 zeroize = "1"
 
 [profile.release]
-lto = true
+# No LTO: with it the static library's objects are LLVM bitcode from Rust's
+# LLVM, which Xcode's older LLVM cannot read (nm and the linker fail with
+# "Unknown attribute kind"). The app's own link removes unused code.
+lto = false
 codegen-units = 1
-strip = "symbols"
+# Debug information only: the exported C symbols must stay in the archive.
+strip = "debuginfo"
 opt-level = "s"
 
 [dev-dependencies]
