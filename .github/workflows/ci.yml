@@ -36,6 +36,15 @@ jobs:
       - name: Fetch the locked crates
         run: cargo fetch --locked
 
+      # The GnuPG interoperability tests need gpg 2.4 (the version that
+      # sends OCB packets by default). It comes with the runner image;
+      # nothing is installed. The tests fail, not skip, without it.
+      - name: Check GnuPG for the interoperability tests
+        run: |
+          gpg --version > "$RUNNER_TEMP/gpg-version"
+          cat "$RUNNER_TEMP/gpg-version"
+          grep -qE '^gpg \(GnuPG\) 2\.4\.' "$RUNNER_TEMP/gpg-version"
+
       - name: Test
         run: cargo test --locked --offline
 

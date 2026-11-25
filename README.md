@@ -82,7 +82,20 @@ rPGP leaves to the application.
 - Legacy SED (no integrity check) is refused before decrypting:
   `not_integrity_protected`.
 - A failed MDC (SEIPD v1, checked before any plaintext is released) or AEAD
-  tag (SEIPD v2) is `not_integrity_protected` too.
+  tag (SEIPD v2, GnuPG OCB) is `not_integrity_protected` too.
+- GnuPG's OCB Encrypted Data packet (type 20, LibrePGP), which GnuPG 2.4
+  sends by default to keys it generated, is decrypted through rPGP's
+  `DecryptionOptions::enable_gnupg_aead`. It is authenticated encryption, and
+  rPGP bounds it: OCB only (EAX does not parse: `malformed`), AES only (other
+  ciphers: `unsupported`), chunks of 64 B to 4 MiB, each chunk's tag checked
+  before its plaintext is read and a final tag over the length, so a
+  truncated message fails. The whole plaintext is read before anything is
+  returned: a failure releases nothing, not even chunks that authenticated.
+  The option also enables GnuPG's v5 password packet (SKESK), which is unused:
+  decryption here takes no message password.
+- Well-formed features rPGP does not implement are `unsupported` when rPGP
+  says so with a typed error. BZip2 content (rPGP is built without it) and
+  GnuPG EAX are reported by rPGP with untyped errors and read `malformed`.
 - Compressed, and signed-then-compressed, content is decompressed.
 
 **Limits**
@@ -150,11 +163,15 @@ rPGP leaves to the application.
 ## Build and test
 
 ```sh
-(cd rust && cargo fetch --locked && cargo test --locked --offline)   # any platform
+(cd rust && cargo fetch --locked && cargo test --locked --offline)   # any platform; needs gpg 2.4 on PATH
 (cd rust && cargo deny check advisories)                            # needs cargo-deny 0.20.2
 scripts/third_party_licenses.py --check                             # licences match Cargo.lock
 scripts/build-xcframework.sh                                        # macOS: build/MishMailRPGP.xcframework.zip and .sha256
 ```
+
+The GnuPG interoperability tests run the `gpg` 2.4 on `PATH` (CI uses the
+one on the Ubuntu 24.04 runner image) in throwaway homes under `/tmp`, with
+keys generated at run time. Without it they fail; they are never skipped.
 
 ## Releasing
 

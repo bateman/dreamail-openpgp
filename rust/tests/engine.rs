@@ -639,6 +639,236 @@ fn a_message_without_integrity_protection_is_refused() {
                Err(EngineError::NotIntegrityProtected));
 }
 
+// MARK: - GnuPG interoperability
+
+/// A throwaway GnuPG home. GnuPG 2.4 is required (it is on CI's Ubuntu
+/// image): without it these tests fail, they are not skipped. The home is
+/// short and under /tmp because gpg-agent's socket path has a length limit.
+struct Gpg {
+    home: std::path::PathBuf,
+}
+
+impl Gpg {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let home = std::path::PathBuf::from(format!(
+            "/tmp/mmgpg-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir(&home).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let gpg = Gpg { home };
+        let version = String::from_utf8(gpg.run(&["--version"], b"")).unwrap();
+        assert!(version.starts_with("gpg (GnuPG) 2.4."), "GnuPG 2.4 is required: {version}");
+        gpg
+    }
+
+    fn run(&self, args: &[&str], stdin: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("gpg")
+            .arg("--homedir").arg(&self.home)
+            .args(["--batch", "--no-tty", "--quiet", "--pinentry-mode", "loopback", "--passphrase", "",
+                   "--trust-model", "always", "--no-auto-key-locate"])
+            .args(args)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .spawn()
+            .expect("gpg (GnuPG 2.4) must be installed to run the interoperability tests");
+        child.stdin.take().unwrap().write_all(stdin).unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(out.status.success(), "gpg {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        out.stdout
+    }
+
+    /// A key as GnuPG 2.4 makes it by default (Ed25519 + Cv25519,
+    /// advertising AEAD), without a passphrase. Returns (secret, public), armored.
+    fn generate(&self, uid: &str) -> (Vec<u8>, Vec<u8>) {
+        self.run(&["--quick-generate-key", uid, "default", "default", "never"], b"");
+        (self.run(&["--armor", "--export-secret-keys", uid], b""),
+         self.run(&["--armor", "--export", uid], b""))
+    }
+
+    /// `gpg --encrypt` (binary) to `to`, with extra options.
+    fn encrypt(&self, to: &str, options: &[&str], plaintext: &[u8]) -> Vec<u8> {
+        let mut args = vec!["--encrypt", "--recipient", to];
+        args.extend_from_slice(options);
+        self.run(&args, plaintext)
+    }
+}
+
+impl Drop for Gpg {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("gpgconf")
+            .arg("--homedir").arg(&self.home).args(["--kill", "all"])
+            .output();
+        let _ = std::fs::remove_dir_all(&self.home);
+    }
+}
+
+fn tags(binary: &[u8]) -> Vec<u8> {
+    packets(binary).into_iter().map(|(tag, _)| tag).collect()
+}
+
+/// The message with the body of its OCB Encrypted Data packet (type 20)
+/// changed by `edit`, re-framed with a fixed length.
+fn edit_ocb(binary: &[u8], edit: impl Fn(&mut Vec<u8>)) -> Vec<u8> {
+    packets(binary)
+        .into_iter()
+        .flat_map(|(tag, mut body)| {
+            if tag == 20 {
+                edit(&mut body);
+            }
+            packet(tag, &body)
+        })
+        .collect()
+}
+
+/// Size of the header of a type 20 body: version, cipher, mode, chunk
+/// size, then OCB's 15-octet IV.
+const OCB_HEADER: usize = 4 + 15;
+const TAG: usize = 16;
+
+/// What GnuPG 2.4 sends by default to a key it generated: AES-256 OCB in
+/// packet type 20, compressed and signed. It decrypts, and the inner
+/// signature verifies.
+#[test]
+fn gnupg_ocb_message_decrypts() {
+    let gpg = Gpg::new();
+    let (bob_secret, _) = gpg.generate("Bob <bob@example.net>");
+    let (_, alice_public) = gpg.generate("Alice <alice@example.org>");
+    let text = b"Ciao Bob, from GnuPG 2.4\n";
+    for armored in [false, true] {
+        let mut options = vec!["--sign", "--local-user", "alice@example.org"];
+        if armored {
+            options.push("--armor");
+        }
+        let msg = gpg.encrypt("bob@example.net", &options, text);
+        if !armored {
+            assert_eq!(tags(&msg), [1, 20], "GnuPG chose packet type 20");
+            assert_eq!(&packets(&msg)[1].1[..3], [1, 9, 2], "v1, AES-256, OCB");
+        }
+        let out = engine::decrypt(&msg, &bob_secret, b"", &alice_public, now()).unwrap();
+        assert_eq!(out.plaintext.as_slice(), text);
+        assert!(out.integrity_protected);
+        assert!(matches!(&out.signatures[..], [SignatureResult::Good { signer }]
+            if signer.user_ids == ["Alice <alice@example.org>"]), "{:?}", out.signatures);
+    }
+}
+
+/// Several small chunks (GnuPG's `--chunk-size 10`: 1 KiB), uncompressed,
+/// so ciphertext, chunk tags and the final tag are at known places.
+fn chunked_ocb(gpg: &Gpg, plaintext: &[u8]) -> Vec<u8> {
+    let msg = gpg.encrypt("bob@example.net", &["--compress-algo", "none", "--chunk-size", "10"], plaintext);
+    assert_eq!(tags(&msg), [1, 20]);
+    assert_eq!(packets(&msg)[1].1[3], 4, "1 KiB chunks");
+    msg
+}
+
+/// Tampered ciphertext, a tampered chunk tag, a tampered final tag, and
+/// every way of cutting the message short: an error, never plaintext,
+/// not even the chunks that did authenticate.
+#[test]
+fn gnupg_ocb_tampering_and_truncation_release_nothing() {
+    let gpg = Gpg::new();
+    let (bob, _) = gpg.generate("Bob <bob@example.net>");
+    let text = vec![b'x'; 4000];
+    let msg = chunked_ocb(&gpg, &text);
+    assert_eq!(engine::decrypt(&msg, &bob, b"", b"", now()).unwrap().plaintext.as_slice(), &text[..]);
+
+    let body_len = packets(&msg)[1].1.len();
+    // The literal data packet is a little over 4000 octets: four chunks.
+    let chunk = 1024 + TAG;
+    let first_tag = OCB_HEADER + 1024;
+    let flips = [
+        ("ciphertext, first chunk", OCB_HEADER + 100),
+        ("ciphertext, second chunk", OCB_HEADER + chunk + 7),
+        ("first chunk's tag", first_tag + 3),
+        ("final tag", body_len - 1),
+    ];
+    for (what, at) in flips {
+        let bad = edit_ocb(&msg, |b| b[at] ^= 0x40);
+        assert_eq!(engine::decrypt(&bad, &bob, b"", b"", now()).map(|_| ()),
+                   Err(EngineError::NotIntegrityProtected), "{what}");
+    }
+
+    // Cut short: every authenticated chunk is withheld too. With no
+    // ciphertext left at all there is nothing to authenticate: malformed.
+    let integrity = Err(EngineError::NotIntegrityProtected);
+    let cuts = [
+        ("final tag removed", body_len - TAG, false, integrity),
+        ("last octet removed", body_len - 1, false, integrity),
+        ("last chunk and final tag removed", OCB_HEADER + 3 * chunk, false, integrity),
+        ("last two chunks removed, final tag kept", OCB_HEADER + 2 * chunk, true, integrity),
+        ("cut inside the second chunk", OCB_HEADER + chunk + 500, false, integrity),
+        ("only the first chunk", OCB_HEADER + chunk, false, integrity),
+        ("header only", OCB_HEADER, false, Err(EngineError::Malformed)),
+    ];
+    for (what, keep, keep_final_tag, expected) in cuts {
+        let short = edit_ocb(&msg, |b| {
+            let final_tag = b[body_len - TAG..].to_vec();
+            b.truncate(keep);
+            if keep_final_tag {
+                b.extend_from_slice(&final_tag);
+            }
+        });
+        assert_eq!(engine::decrypt(&short, &bob, b"", b"", now()).map(|_| ()), expected, "{what}");
+    }
+
+    // The same octets as an armored message: same outcome.
+    let bad = edit_ocb(&msg, |b| b[OCB_HEADER + 100] ^= 0x40);
+    let armored = gpg.run(&["--enarmor"], &bad);
+    assert_eq!(engine::decrypt(&armored, &bob, b"", b"", now()).map(|_| ()),
+               Err(EngineError::NotIntegrityProtected));
+}
+
+/// Well-formed type 20 messages with a cipher rPGP has no OCB for
+/// (Camellia, Twofish) are `unsupported`. GnuPG's EAX mode
+/// (mode octet 1, which GnuPG 2.4 no longer emits) is refused by rPGP's
+/// parser with an untyped error, so it reads `malformed`.
+#[test]
+fn gnupg_ocb_with_other_ciphers_or_eax_is_refused() {
+    let gpg = Gpg::new();
+    let (bob, _) = gpg.generate("Bob <bob@example.net>");
+    for (cipher, id) in [("CAMELLIA256", 13), ("TWOFISH", 10)] {
+        let msg = gpg.encrypt("bob@example.net", &["--cipher-algo", cipher], b"secret");
+        assert_eq!(tags(&msg), [1, 20], "{cipher}");
+        assert_eq!(packets(&msg)[1].1[1], id, "{cipher}");
+        assert_eq!(engine::decrypt(&msg, &bob, b"", b"", now()).map(|_| ()),
+                   Err(EngineError::Unsupported), "{cipher}");
+    }
+    // BZip2: rPGP is built without it and reports that with an untyped I/O
+    // error, so it reads `malformed` (a known limit, in the README).
+    let msg = gpg.encrypt("bob@example.net", &["--compress-algo", "bzip2"], &[b'z'; 1000]);
+    assert_eq!(engine::decrypt(&msg, &bob, b"", b"", now()).map(|_| ()), Err(EngineError::Malformed));
+
+    let msg = gpg.encrypt("bob@example.net", &[], b"secret");
+    let eax = edit_ocb(&msg, |b| b[2] = 1);
+    assert_eq!(engine::decrypt(&eax, &bob, b"", b"", now()).map(|_| ()), Err(EngineError::Malformed));
+}
+
+/// GnuPG to a key that does not advertise its AEAD format (one made by
+/// rPGP): SEIPD v1 with an MDC, as before.
+#[test]
+fn gnupg_seipd_v1_message_decrypts_as_before() {
+    let gpg = Gpg::new();
+    let bob = generate("Bob <bob@example.net>", None);
+    gpg.run(&["--import"], &public_armor(&bob));
+    let msg = gpg.encrypt("bob@example.net", &["--compress-algo", "none"], &[b'y'; 3000]);
+    assert_eq!(tags(&msg), [1, 18]);
+    let out = engine::decrypt(&msg, &secret_armor(&bob), b"", b"", now()).unwrap();
+    assert_eq!(out.plaintext.as_slice(), &[b'y'; 3000][..]);
+    let bad = packets(&msg).into_iter().flat_map(|(tag, mut body)| {
+        if tag == 18 { body[100] ^= 0x01; }
+        packet(tag, &body)
+    }).collect::<Vec<u8>>();
+    assert_eq!(engine::decrypt(&bad, &secret_armor(&bob), b"", b"", now()).map(|_| ()),
+               Err(EngineError::NotIntegrityProtected));
+}
+
 // MARK: - FFI
 
 #[test]
