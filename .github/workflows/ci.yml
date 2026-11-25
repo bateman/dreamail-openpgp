@@ -58,3 +58,32 @@ jobs:
 
       - name: Shellcheck the build script
         run: shellcheck ../scripts/build-xcframework.sh
+
+  # The release builds this on macOS; build it here too, twice, so a break in
+  # the build script or a build that is not reproducible shows on the pull
+  # request and not at release time. Nothing is published.
+  xcframework:
+    name: xcframework build (macOS)
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # SOURCE_DATE_EPOCH comes from the last commit touching rust/.
+          fetch-depth: 0
+
+      - name: Install the pinned Rust toolchain
+        working-directory: rust
+        run: rustup toolchain install
+
+      - name: Build twice and compare
+        run: |
+          scripts/build-xcframework.sh "$RUNNER_TEMP/a"
+          rm -rf rust/target
+          scripts/build-xcframework.sh "$RUNNER_TEMP/b"
+          if ! cmp "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip" "$RUNNER_TEMP/b/MishMailRPGP.xcframework.zip"; then
+            echo "The two builds differ: not reproducible." >&2
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip.sha256"

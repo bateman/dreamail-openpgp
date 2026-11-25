@@ -53,14 +53,26 @@ lipo -create \
 
 # Every function the header declares must be exported, and nothing else
 # named mm_ may be.
-expected=$(grep -oE 'mm_pgp_[a-z_]+\(' include/mishmail_rpgp.h | tr -d '(' | LC_ALL=C sort -u)
-exported=$(nm -gU "$out/universal/libmishmail_rpgp.a" 2>/dev/null \
-	| awk '{print $NF}' | grep -E '^_mm_' | sed 's/^_//' | LC_ALL=C sort -u)
-if [ "$expected" != "$exported" ]; then
-	echo "Header and exported symbols differ:" >&2
+# A step that finds nothing must say so, not end the script silently
+# (grep exits 1 on no match, which `set -e -o pipefail` turns into an exit).
+expected=$(grep -oE 'mm_pgp_[a-z_]+\(' include/mishmail_rpgp.h | tr -d '(' | LC_ALL=C sort -u || true)
+nm -gU "$out/universal/libmishmail_rpgp.a" > "$out/symbols.txt" 2> "$out/nm-errors.txt" || {
+	echo "nm failed on the universal library:" >&2
+	cat "$out/nm-errors.txt" >&2
+	exit 1
+}
+exported=$(awk '{print $NF}' "$out/symbols.txt" | grep -E '^_mm_' | sed 's/^_//' | LC_ALL=C sort -u || true)
+if [ -z "$expected" ] || [ "$expected" != "$exported" ]; then
+	echo "Header and exported symbols differ (header on the left, library on the right):" >&2
 	diff <(echo "$expected") <(echo "$exported") >&2 || true
+	echo "nm reported $(wc -l < "$out/symbols.txt" | tr -d ' ') lines; its errors, if any:" >&2
+	cat "$out/nm-errors.txt" >&2
+	echo "Members of the library:" >&2
+	lipo -info "$out/universal/libmishmail_rpgp.a" >&2 || true
+	ar -t target/aarch64-apple-darwin/release/libmishmail_rpgp.a | head -20 >&2 || true
 	exit 1
 fi
+rm -f "$out/symbols.txt" "$out/nm-errors.txt"
 
 cp include/mishmail_rpgp.h include/module.modulemap "$out/headers/"
 xcodebuild -create-xcframework \
