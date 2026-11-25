@@ -1,0 +1,14 @@
+# Version updates for the Rust crates and the pinned GitHub Actions. Each
+# update is a pull request that runs CI (tests, clippy, licences, advisories);
+# nothing merges by itself.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /rust
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

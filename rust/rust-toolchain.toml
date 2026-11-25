@@ -1,0 +1,6 @@
+# Fixed compiler for reproducible builds of the xcframework (rPGP needs >= 1.88).
+[toolchain]
+channel = "1.97.0"
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+profile = "minimal"
+components = ["clippy"]
