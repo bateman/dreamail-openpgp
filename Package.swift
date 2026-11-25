@@ -8,8 +8,8 @@
 // `version` and `checksum` below to that release. Consumers pin that commit.
 import PackageDescription
 
-let version = "0.0.0"  // no release yet
-let checksum = "0000000000000000000000000000000000000000000000000000000000000000"  // no release yet
+let version = "0.1.0"
+let checksum = "0142aaa4c25bbbfc7eca1b27d50eef8d52edd7ca6abef1f8f47a59b1d4944a94"
 
 let package = Package(
     name: "dreamail-openpgp",
