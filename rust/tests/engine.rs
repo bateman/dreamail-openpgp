@@ -815,7 +815,7 @@ fn gnupg_ocb_tampering_and_truncation_release_nothing() {
     // text: find a text length that makes it exactly two chunks.
     let exact = (2000..2048)
         .map(|n| chunked_ocb(&gpg, &plain, &vec![b'e'; n]))
-        .find(|m| (packets(m)[1].1.len() - OCB_HEADER - TAG) % chunk == 0)
+        .find(|m| (packets(m)[1].1.len() - OCB_HEADER - TAG).is_multiple_of(chunk))
         .expect("a text length that fills two chunks exactly");
     let shapes = [
         ("plain", chunked_ocb(&gpg, &plain, &text)),
