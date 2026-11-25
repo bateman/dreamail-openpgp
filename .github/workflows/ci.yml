@@ -87,3 +87,15 @@ jobs:
             exit 1
           fi
           cat "$RUNNER_TEMP/a/MishMailRPGP.xcframework.zip.sha256"
+
+      # The library must link with Apple's linker for both architectures and
+      # answer a call. The runner is arm64, so only that binary is run.
+      - name: Link and call the library
+        run: |
+          lib="$RUNNER_TEMP/a/universal/libmishmail_rpgp.a"
+          for arch in arm64 x86_64; do
+            clang -arch "$arch" -mmacosx-version-min=14.0 -Wall -Werror \
+              -I rust/include scripts/smoke/link_check.c "$lib" \
+              -o "$RUNNER_TEMP/link_check_$arch"
+          done
+          "$RUNNER_TEMP/link_check_arm64"

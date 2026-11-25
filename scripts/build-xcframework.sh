@@ -56,17 +56,18 @@ lipo -create \
 # A step that finds nothing must say so, not end the script silently
 # (grep exits 1 on no match, which `set -e -o pipefail` turns into an exit).
 expected=$(grep -oE 'mm_pgp_[a-z_]+\(' include/mishmail_rpgp.h | tr -d '(' | LC_ALL=C sort -u || true)
-nm -gU "$out/universal/libmishmail_rpgp.a" > "$out/symbols.txt" 2> "$out/nm-errors.txt" || {
-	echo "nm failed on the universal library:" >&2
-	cat "$out/nm-errors.txt" >&2
-	exit 1
-}
+# Xcode's nm exits non-zero on this library: the Rust standard library's
+# objects carry LLVM bitcode from a newer LLVM than Xcode's, which nm tries
+# to read and cannot ("Unknown attribute kind"). The machine code and the
+# symbol table next to it are fine, so the exit status is not used: the
+# comparison below decides, and nm's messages are shown only if it fails.
+nm -gU "$out/universal/libmishmail_rpgp.a" > "$out/symbols.txt" 2> "$out/nm-errors.txt" || true
 exported=$(awk '{print $NF}' "$out/symbols.txt" | grep -E '^_mm_' | sed 's/^_//' | LC_ALL=C sort -u || true)
 if [ -z "$expected" ] || [ "$expected" != "$exported" ]; then
 	echo "Header and exported symbols differ (header on the left, library on the right):" >&2
 	diff <(echo "$expected") <(echo "$exported") >&2 || true
-	echo "nm reported $(wc -l < "$out/symbols.txt" | tr -d ' ') lines; its errors, if any:" >&2
-	cat "$out/nm-errors.txt" >&2
+	echo "nm reported $(wc -l < "$out/symbols.txt" | tr -d ' ') lines; the first of its messages:" >&2
+	head -20 "$out/nm-errors.txt" >&2
 	echo "Members of the library:" >&2
 	lipo -info "$out/universal/libmishmail_rpgp.a" >&2 || true
 	ar -t target/aarch64-apple-darwin/release/libmishmail_rpgp.a | head -20 >&2 || true
