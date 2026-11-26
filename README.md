@@ -195,6 +195,41 @@ checks, as in release, so that they exercise the shipped arithmetic: rPGP
 0.21.1 underflows (debug panic, release wrap then a bounds-check error) on
 an unknown AEAD octet in a SEIPD v2 header.
 
+`make check` runs the same checks; `make licences` regenerates the licence file.
+
+## Upgrading rPGP
+
+The **Upgrade rPGP** workflow runs every Monday (or by hand, with an
+optional version). When crates.io has a newer stable `pgp`, it runs
+`scripts/upgrade_rpgp.py` on `main`, pushes `deps/rpgp-<version>` and opens a
+pull request, as a draft if a check failed. Locally the same is
+`make upgrade-rpgp [VERSION=X.Y.Z]`, which leaves the changes uncommitted.
+
+The script does the mechanical part:
+
+- checks the release on crates.io: not yanked, MSRV within the pinned
+  toolchain (otherwise it stops: raising the toolchain is a separate change);
+- sets the exact pin and runs `cargo update -p pgp --precise`, so only what
+  rPGP requires moves in `Cargo.lock`, and checks the lockfile checksum
+  against crates.io;
+- reads the tag object and commit of git tag `v<version>`;
+- regenerates `THIRD_PARTY_LICENSES.md` and updates "What is pinned";
+- runs tests, clippy, the licence check and cargo-deny;
+- writes the report `build/rpgp-upgrade-<version>.md`, which is the pull
+  request's body: lockfile changes, check results, and the remaining
+  mentions of the old version.
+
+The rest is review, and stays human: the rPGP changelog; the policy in
+`rust/src/engine.rs` (error mapping, `enable_gnupg_aead`, refused
+algorithms); whether `cx448` is still mandatory and the SEIPD v2 underflow
+still there; the `rust/deny.toml` ignores and the known limits; licence files
+of new crates. Then the usual release (below) and, in DreaMail, the new
+`revision` in `project.yml` and the version in `docs/DEPENDENCIES.md`.
+
+Pull requests opened with `GITHUB_TOKEN` do not trigger CI by themselves:
+the workflow dispatches CI on the branch. It needs "Allow GitHub Actions to
+create and approve pull requests" (Settings, Actions, General).
+
 ## Releasing
 
 1. Run the **Release** workflow with a version, e.g. `0.1.0`. It checks
