@@ -243,7 +243,7 @@ def main(argv: list[str]) -> int:
         "",
         *(lock_diff(old_lock, new_lock) or ["- only `pgp` changed"]),
         "",
-        "## Needs human review",
+        "## Review checklist (after the merge, if every check passed)",
         "",
         "- [ ] rPGP changelog: API changes, security fixes, new or removed dependencies",
         "- [ ] `rust/src/engine.rs` policy still holds (algorithms, hashes, validity, limits, "

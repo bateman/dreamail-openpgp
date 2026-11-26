@@ -3,9 +3,13 @@ name: Upgrade rPGP
 # Weekly, or by hand: if crates.io has a newer stable rPGP (or the version
 # given), runs scripts/upgrade_rpgp.py on main, pushes branch
 # deps/rpgp-<version> and opens a pull request whose body is the script's
-# report. If a check failed the pull request is a draft, to be fixed on the
-# branch. Nothing is merged: the policy review stays human (README,
-# "Upgrading rPGP").
+# report.
+#
+# If every check passed, it waits for CI on the branch, merges the pull
+# request without review (owner's decision) and dispatches the Release
+# workflow. If a check failed, the pull request is a draft, left for a
+# person to fix on the branch; merging it then starts the release
+# (README, "Upgrading rPGP").
 #
 # Pull requests opened with GITHUB_TOKEN do not trigger the CI workflow, so
 # this job dispatches it on the branch; its checks then appear on the pull
@@ -32,11 +36,11 @@ jobs:
   upgrade:
     name: Upgrade and open a pull request
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 75
     permissions:
-      contents: write       # push deps/rpgp-<version>
-      pull-requests: write  # open the pull request
-      actions: write        # dispatch CI on the branch
+      contents: write       # push deps/rpgp-<version>, merge
+      pull-requests: write  # open and merge the pull request
+      actions: write        # dispatch CI and the release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -91,10 +95,11 @@ jobs:
             echo "passed=$([ "$status" -eq 0 ] && echo true || echo false)"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Push the branch and open the pull request
+      - name: Push the branch, open the pull request, merge when green
         if: steps.upgrade.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ steps.upgrade.outputs.version }}
           REPORT: ${{ steps.upgrade.outputs.report }}
           BRANCH: ${{ steps.upgrade.outputs.branch }}
@@ -117,10 +122,18 @@ jobs:
             echo "---"
             echo "Opened by the Upgrade rPGP workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). CI is dispatched on this branch."
           } >> "$REPORT"
-          draft=()
           if [ "$PASSED" != "true" ]; then
-            draft=(--draft)
+            gh pr create --base "$BASE" --head "$BRANCH" --draft \
+              --title "Upgrade rPGP to $VERSION" --body-file "$REPORT"
+            gh workflow run ci.yml --ref "$BRANCH"
+            echo "A check failed: draft pull request, left for a person." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
-          gh pr create --base "$BASE" --head "$BRANCH" "${draft[@]}" \
+          gh pr create --base "$BASE" --head "$BRANCH" \
             --title "Upgrade rPGP to $VERSION" --body-file "$REPORT"
-          gh workflow run ci.yml --ref "$BRANCH"
+          # Every check passed: merge once CI passes too, then release. A
+          # merge made with GITHUB_TOKEN triggers no workflow, so the
+          # release is dispatched here.
+          scripts/merge_when_green.sh "$BRANCH"
+          gh workflow run release.yml --ref "$BASE"
+          echo "Merged and released: see the Release workflow." >> "$GITHUB_STEP_SUMMARY"

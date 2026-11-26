@@ -202,7 +202,10 @@ an unknown AEAD octet in a SEIPD v2 header.
 The **Upgrade rPGP** workflow runs every Monday (or by hand, with an
 optional version). When crates.io has a newer stable `pgp`, it runs
 `scripts/upgrade_rpgp.py` on `main`, pushes `deps/rpgp-<version>` and opens a
-pull request, as a draft if a check failed. Locally the same is
+pull request. If every check passed, it waits for CI on the branch, merges
+the pull request **without review** (owner's decision) and dispatches the
+release. If a check failed, the pull request is a draft and waits for a
+person; merging it then starts the release. Locally the same script is
 `make upgrade-rpgp [VERSION=X.Y.Z]`, which leaves the changes uncommitted.
 
 The script does the mechanical part:
@@ -219,22 +222,26 @@ The script does the mechanical part:
   request's body: lockfile changes, check results, and the remaining
   mentions of the old version.
 
-The rest is review, and stays human: the rPGP changelog; the policy in
-`rust/src/engine.rs` (error mapping, `enable_gnupg_aead`, refused
-algorithms); whether `cx448` is still mandatory and the SEIPD v2 underflow
-still there; the `rust/deny.toml` ignores and the known limits; licence files
-of new crates. Merging the pull request starts the release by itself (below);
-then, in DreaMail, the new `revision` in `project.yml` and the version in
-`docs/DEPENDENCIES.md`.
+The tests are therefore the gate for an upgrade that passes them. The
+report's checklist is what a person still reads, after the merge: the rPGP
+changelog; whether the policy in `rust/src/engine.rs` still holds (error
+mapping, `enable_gnupg_aead`, refused algorithms); whether `cx448` is still
+mandatory and the SEIPD v2 underflow still there; the `rust/deny.toml`
+ignores and the known limits; licence files of new crates. The upgrade does
+not reach the app until DreaMail moves its `revision` (below).
 
-Pull requests opened with `GITHUB_TOKEN` do not trigger CI by themselves:
-the workflow dispatches CI on the branch. It needs "Allow GitHub Actions to
-create and approve pull requests" (Settings, Actions, General).
+Pull requests opened with `GITHUB_TOKEN` do not trigger CI, and a merge
+made with it triggers no workflow: `scripts/merge_when_green.sh` dispatches
+CI on the branch, waits for it and merges only if it passed, and the
+workflows dispatch what follows. It needs "Allow GitHub Actions to create
+and approve pull requests" (Settings, Actions, General), and no branch rule
+requiring a review on `main`.
 
 ## Releasing
 
-1. The **Release** workflow runs by itself when an rPGP upgrade pull request
-   (`deps/rpgp-*`) is merged, or by hand. With no version it takes the
+1. The **Release** workflow runs after an rPGP upgrade is merged (dispatched
+   by Upgrade rPGP, or by the merge itself when a person makes it), or by
+   hand. A commit that already carries a release tag is not released again. With no version it takes the
    latest release tag and raises the patch number (`v0.2.0` → `0.2.1`); give
    one by hand for a minor or major release, e.g. when the C interface
    changes. It checks licences and advisories, builds the zip twice, refuses
@@ -242,9 +249,9 @@ create and approve pull requests" (Settings, Actions, General).
    zip, its `.sha256` and `THIRD_PARTY_LICENSES.md`.
 2. The same workflow then downloads the published zip, checks it against
    the checksum, and opens the pull request `release/package-v<version>`
-   that sets `version` and `checksum` in `Package.swift`. Merging it is the
-   reviewed commit. Cross-check the checksum with a local
-   `scripts/build-xcframework.sh` on another Mac.
+   that sets `version` and `checksum` in `Package.swift`, and merges it once
+   CI passes, without review (owner's decision). Cross-check the checksum
+   with a local `scripts/build-xcframework.sh` on another Mac.
 3. DreaMail pins **that commit** in `project.yml`, the same way as GRDB:
    ```yaml
    packages:
