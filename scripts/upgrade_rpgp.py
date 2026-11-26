@@ -28,10 +28,11 @@ otherwise the upgrade waits for a person (a draft pull request).
 Usage: scripts/upgrade_rpgp.py [VERSION] [--allow-dirty | --check | --no-checks]
   --check      only print the version an upgrade would go to (nothing if rPGP
                is up to date), after the same crates.io and downgrade checks.
-               With no VERSION, a release younger than COOLDOWN_DAYS is not
-               offered yet (the weekly run takes it a week later).
-  --no-checks  steps 1 to 5 and the report, without step 6: what the Upgrade
-               rPGP workflow's write job does, which never runs crate code.
+               With no VERSION: the newest release at least COOLDOWN_DAYS old.
+  --no-checks  steps 1 to 5, the crate age and new-name check (metadata
+               only) and the report, without tests, clippy, licences and
+               advisories: what the Upgrade rPGP workflow's write job does,
+               which never runs crate code. Exit 1 if that check fails.
 Exit status: 0 if every check passed (or rPGP is already at that version),
 1 if the upgrade was made but a check failed (the tree is left as is, to be
 fixed on the branch), 2 if it could not be made (crates.io unreachable,
@@ -47,6 +48,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 import tomllib
 import urllib.request
 from pathlib import Path
@@ -113,6 +115,9 @@ def crate_vcs_commit(version: str) -> str:
     try:
         with tarfile.open(found[0]) as archive:
             info = json.load(archive.extractfile(f"pgp-{version}/.cargo_vcs_info.json"))
+        # Published from a modified tree, or from a subdirectory: not the tag.
+        if info["git"].get("dirty") or info.get("path_in_vcs", "") != "":
+            fail(f"pgp-{version}.crate was not published from a clean checkout of the repository root")
         return info["git"]["sha1"]
     except (KeyError, TypeError, ValueError, tarfile.TarError) as error:
         fail(f"pgp-{version}.crate records no source commit: {error}")
@@ -128,12 +133,24 @@ def young_or_new_crates(old: str, new: str) -> list[str]:
             problems.append(f"`{name}` is a new crate")
             continue
         for version in sorted(after[name] - before.get(name, set())):
+            time.sleep(1)  # crates.io asks automated clients for one request a second
             info = crates_io(f"/{name}/{version}").get("version") or {}
             if not info.get("created_at"):
                 problems.append(f"`{name}` {version}: no publication date on crates.io")
             elif age_days(info["created_at"]) < COOLDOWN_DAYS:
                 problems.append(f"`{name}` {version} is younger than {COOLDOWN_DAYS} days")
     return problems
+
+
+def newest_settled_version() -> str:
+    """The newest stable, not yanked pgp release at least COOLDOWN_DAYS old:
+    a newer one waits, but does not hold back an older one that is ready."""
+    versions = [v for v in crates_io("/pgp").get("versions", [])
+                if SEMVER.match(v.get("num", "")) and not v.get("yanked")
+                and v.get("created_at") and age_days(v["created_at"]) >= COOLDOWN_DAYS]
+    if not versions:
+        fail("crates.io lists no stable pgp release older than the cooldown")
+    return max(versions, key=lambda v: version_tuple(v["num"]))["num"]
 
 
 def lock_packages(text: str) -> dict[str, set[str]]:
@@ -222,7 +239,7 @@ def main(argv: list[str]) -> int:
     if not pin:
         fail("no exact `pgp` pin found in rust/Cargo.toml")
     old = pin.group(2)
-    version = args[0] if args else crates_io("/pgp").get("crate", {}).get("max_stable_version", "")
+    version = args[0] if args else newest_settled_version()
     if not SEMVER.match(version):
         fail(f"not a stable MAJOR.MINOR.PATCH version: {version!r}")
     if version_tuple(version) < version_tuple(old):
@@ -244,9 +261,6 @@ def main(argv: list[str]) -> int:
              f"{toolchain}: raise rust/rust-toolchain.toml (and rust-version) first")
     if check_only:
         # The version to upgrade to, for the workflow; no change is made.
-        if not args and age_days(info["created_at"]) < COOLDOWN_DAYS:
-            print(f"pgp {version} is younger than {COOLDOWN_DAYS} days: not yet.", file=sys.stderr)
-            return 0
         print(version)
         return 0
     date = datetime.date.fromisoformat(info["created_at"][:10])
@@ -287,10 +301,13 @@ def main(argv: list[str]) -> int:
                   tag_object, commit, len(lock) - 1, linked)
 
     # 6. The CI checks (they run crate code: never with a write token).
-    supply = [] if no_checks else young_or_new_crates(old_lock, new_lock)
-    results = [] if no_checks else [
-        (f"crates at least {COOLDOWN_DAYS} days old, no new crate names"
-         + ("" if not supply else ": " + "; ".join(supply)), not supply),
+    # Metadata only (crates.io), so it also runs with --no-checks, on the
+    # lockfile that is actually published.
+    supply = young_or_new_crates(old_lock, new_lock)
+    supply_row = (f"crates at least {COOLDOWN_DAYS} days old, no new crate names"
+                  + ("" if not supply else ": " + "; ".join(supply)), not supply)
+    results = [supply_row] if no_checks else [
+        supply_row,
         check("tests", ["cargo", "test", "--locked", "--offline"]),
         check("clippy", ["cargo", "clippy", "--locked", "--offline", "--all-targets", "--", "-D", "warnings"]),
         check("licences", [sys.executable, str(ROOT / "scripts" / "third_party_licenses.py"), "--check"]),
@@ -323,7 +340,8 @@ def main(argv: list[str]) -> int:
         "## Checks",
         "",
         *([f"- [{'x' if ok else ' '}] {name}" for name, ok in results]
-          or ["- not run here (`--no-checks`)"]),
+          or ["- none"]),
+        *(["- tests, clippy, licences and advisories: not run here (`--no-checks`)"] if no_checks else []),
         "",
         "## Cargo.lock",
         "",
@@ -354,7 +372,8 @@ def main(argv: list[str]) -> int:
     if failed:
         print("Failed: " + ", ".join(failed), file=sys.stderr)
         return 1
-    print("Checks not run (--no-checks)." if no_checks else
+    print("Crate age check passed; tests, clippy, licences, advisories not run (--no-checks)."
+          if no_checks else
           "All checks passed. Review the report, then commit and open a PR.")
     return 0
 

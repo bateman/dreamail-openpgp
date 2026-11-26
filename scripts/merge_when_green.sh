@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Dispatches CI on BRANCH, whose head must be SHA, waits for that run, and
-# squash-merges the branch's pull request only if CI passed, and only at
-# SHA (a push to the branch meanwhile makes the merge fail). If CI fails,
-# the pull request goes back to draft and the script fails. Used by the
+# squash-merges pull request PR (a number or URL, never looked up by branch
+# name, which a fork can reuse) only if CI passed, and only at SHA (a push
+# to the branch meanwhile makes the merge fail). If CI fails, the pull
+# request goes back to draft and the script fails; a re-run marks it ready
+# again before merging. Used by the
 # Upgrade rPGP and Release workflows (README, "Upgrading rPGP").
 #
 # Pull requests opened with GITHUB_TOKEN do not trigger CI, so it is
@@ -10,11 +12,13 @@
 # GH_TOKEN (actions: write, contents: write, pull-requests: write) and
 # GH_REPO.
 #
-# Usage: scripts/merge_when_green.sh BRANCH SHA
+# Usage: scripts/merge_when_green.sh BRANCH SHA PR
 set -euo pipefail
 
-branch=${1:?usage: scripts/merge_when_green.sh BRANCH SHA}
-sha=${2:?usage: scripts/merge_when_green.sh BRANCH SHA}
+usage="usage: scripts/merge_when_green.sh BRANCH SHA PR"
+branch=${1:?$usage}
+sha=${2:?$usage}
+pr=${3:?$usage}
 
 runs() {
   gh run list --workflow ci.yml --event workflow_dispatch --branch "$branch" --limit 50 \
@@ -46,9 +50,10 @@ fi
 echo "Waiting for CI run $run on $branch ($sha)."
 if ! gh run watch "$run" --exit-status --interval 30 > /dev/null; then
   echo "CI failed on $branch (run $run): not merging; the pull request is a draft again." >&2
-  gh pr ready "$branch" --undo || true
+  gh pr ready "$pr" --undo || true
   exit 1
 fi
 
-gh pr merge "$branch" --squash --delete-branch --match-head-commit "$sha"
+gh pr ready "$pr" || true
+gh pr merge "$pr" --squash --delete-branch --match-head-commit "$sha"
 echo "Merged $branch at $sha."

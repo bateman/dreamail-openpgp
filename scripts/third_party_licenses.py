@@ -60,7 +60,7 @@ def linked_packages() -> dict:
 def licence_files(package: dict) -> list[Path]:
     directory = Path(package["manifest_path"]).parent
     files = sorted(p for p in directory.iterdir()
-                   if p.is_file() and p.name.lower().startswith(PREFIXES))
+                   if p.is_file() and not p.is_symlink() and p.name.lower().startswith(PREFIXES))
     if not files and package["name"] in SUPPLIED:
         files = sorted((ROOT / "licenses" / SUPPLIED[package["name"]]).iterdir())
     return files

@@ -6,21 +6,24 @@ name: Upgrade rPGP
 #
 # Three jobs, so that crate code never runs where a write token exists:
 #   check    read-only, no crate code: is there a version to take, and no
-#            pull request for it yet? With no version given, a release
-#            younger than 7 days waits for next week's run.
+#            pull request for it yet? With no version given: the newest
+#            release at least 7 days old.
 #   test     read-only: the script with every check (tests, clippy,
 #            licences, advisories, crate age and new crate names). This is
 #            where build scripts and proc macros of the new crates run.
 #   publish  write token, clean checkout of main: the script with
 #            --no-checks (cargo update, fetch and metadata only: no build
-#            script runs), then only rust/Cargo.toml, rust/Cargo.lock,
-#            README.md and THIRD_PARTY_LICENSES.md may differ. It pushes the
-#            branch and opens the pull request.
+#            script runs; the crate age check, on this lockfile), then only
+#            rust/Cargo.toml, rust/Cargo.lock, README.md and
+#            THIRD_PARTY_LICENSES.md may differ. It pushes the branch and
+#            opens the pull request.
 #
-# If every check passed, publish waits for CI on the branch, merges the pull
-# request without review (owner's decision) and dispatches the Release
-# workflow. Otherwise the pull request is a draft, left for a person; merging
-# it then starts the release (README, "Upgrading rPGP").
+# If publish's own crate age and new-name check passed (it runs no crate
+# code) and so did every check of the test job, publish waits for CI on the
+# branch, merges the pull request without review (owner's decision) and
+# dispatches the Release workflow. Otherwise the pull request is a draft,
+# left for a person, who runs Release by hand after merging it (README,
+# "Upgrading rPGP").
 #
 # Pull requests opened with GITHUB_TOKEN do not trigger the CI workflow, and
 # a merge made with it triggers no workflow: scripts/merge_when_green.sh
@@ -78,7 +81,10 @@ jobs:
             exit 0
           fi
           branch="deps/rpgp-$version"
-          if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
+          # This repository's own pull requests only: a fork can open one from
+          # a branch with the same name.
+          if [ -n "$(gh pr list --head "$branch" --state open --json number,isCrossRepository \
+              --jq '.[] | select(.isCrossRepository | not) | .number')" ]; then
             echo "A pull request for $branch is already open: nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
@@ -153,10 +159,19 @@ jobs:
         run: rustup toolchain install
 
       # cargo update, fetch and metadata: no build script or proc macro runs.
+      # The crate age and new-name check runs here, on the lockfile that is
+      # published: exit 1 if it fails, and the pull request is a draft.
       - name: Update the pin, lockfile, licences and README
+        id: update
         env:
           VERSION: ${{ needs.check.outputs.version }}
-        run: python3 scripts/upgrade_rpgp.py "$VERSION" --no-checks
+        run: |
+          status=0
+          python3 scripts/upgrade_rpgp.py "$VERSION" --no-checks || status=$?
+          if [ "$status" -ge 2 ]; then
+            exit "$status"
+          fi
+          echo "settled=$([ "$status" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Push the branch and open the pull request, merge when green
         env:
@@ -164,6 +179,7 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.check.outputs.version }}
           PASSED: ${{ needs.test.outputs.passed }}
+          SETTLED: ${{ steps.update.outputs.settled }}
           BASE: ${{ github.event.repository.default_branch }}
         run: |
           branch="deps/rpgp-$VERSION"
@@ -183,25 +199,33 @@ jobs:
           sha=$(git rev-parse HEAD)
           gh auth setup-git
           git push -q origin "HEAD:refs/heads/$branch"
+          # No local branch for gh pr merge --delete-branch to trip over.
+          git switch -q --detach
+          git branch -q -D "$branch"
 
-          checks="every check passed"
-          if [ "$PASSED" != "true" ]; then
-            checks="**a check failed**: draft, left for a person"
+          # Only this job's own crate check can allow the merge. The test
+          # job's result ran next to crate code: it can only make a draft.
+          if [ "$SETTLED" != "true" ]; then
+            outcome="**the crate age or new-name check failed** (see Checks above): draft, left for a person"
+          elif [ "$PASSED" != "true" ]; then
+            outcome="**a check failed in the read-only test job**: draft, left for a person"
+          else
+            outcome="every check passed"
           fi
           {
             echo
             echo "---"
-            echo "Checks ran in the read-only test job ($checks): $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Opened by the Upgrade rPGP workflow; CI is dispatched on this branch."
+            echo "Tests, clippy, licences and advisories ran in the read-only test job; $outcome: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID. Opened by the Upgrade rPGP workflow; CI is dispatched on this branch."
           } >> "$report"
-          if [ "$PASSED" != "true" ]; then
+          if [ "$SETTLED" != "true" ] || [ "$PASSED" != "true" ]; then
             gh pr create --base "$BASE" --head "$branch" --draft \
               --title "Upgrade rPGP to $VERSION" --body-file "$report"
             gh workflow run ci.yml --ref "$branch"
-            echo "A check failed: draft pull request, left for a person." >> "$GITHUB_STEP_SUMMARY"
+            echo "Draft pull request, left for a person: $outcome." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          gh pr create --base "$BASE" --head "$branch" \
-            --title "Upgrade rPGP to $VERSION" --body-file "$report"
-          scripts/merge_when_green.sh "$branch" "$sha"
+          pr=$(gh pr create --base "$BASE" --head "$branch" \
+            --title "Upgrade rPGP to $VERSION" --body-file "$report")
+          scripts/merge_when_green.sh "$branch" "$sha" "$pr"
           gh workflow run release.yml --ref "$BASE"
           echo "Merged and released: see the Release workflow." >> "$GITHUB_STEP_SUMMARY"

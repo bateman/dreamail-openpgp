@@ -6,12 +6,13 @@ name: Release
 # points Package.swift at that release and merges it once CI passes, without
 # review (owner's decision; README, "Releasing").
 #
-# Runs by hand, or by itself when an rPGP upgrade pull request (branch
-# deps/rpgp-*) is merged into main by a person; the Upgrade rPGP workflow
-# dispatches it after merging one itself, since a merge made with
-# GITHUB_TOKEN triggers no workflow. With
-# no version given, the version is the latest release tag with the patch
-# number raised by one.
+# Runs only by a manual run (workflow_dispatch) on main: by hand, or
+# dispatched by the Upgrade rPGP workflow after it merges an upgrade. Never
+# on a pull_request event, whose workflow definition would come from the
+# pull request's own branch. The attestation's signer is therefore always
+# release.yml@refs/heads/main, which DreaMail requires. With no version
+# given, the version is the latest vX.Y.Z tag with the patch number raised
+# by one.
 on:
   workflow_dispatch:
     inputs:
@@ -19,9 +20,6 @@ on:
         description: "Version to release, e.g. 0.1.0 (empty: latest tag, next patch)"
         required: false
         default: ""
-  pull_request:
-    types: [closed]
-    branches: [main]
 
 permissions:
   contents: read
@@ -35,14 +33,10 @@ jobs:
   # released if that commit already carries a release tag.
   prepare:
     name: Choose the version
-    # By hand from main only, or a merged rPGP upgrade from this repository
-    # (never a fork).
-    if: >-
-      (github.event_name == 'workflow_dispatch' &&
-       github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) ||
-      (github.event.pull_request.merged &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       startsWith(github.event.pull_request.head.ref, 'deps/rpgp-'))
+    # Main only. A run dispatched on another branch uses that branch's copy
+    # of this file, so this guards against mistakes, not against someone
+    # who can push workflows; DreaMail's check of the signer's ref does.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -51,9 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The merge commit on main for a merged pull request; the
-          # dispatched ref otherwise.
-          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
 
@@ -86,6 +78,11 @@ jobs:
           fi
           if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "Version must be MAJOR.MINOR.PATCH, got '$VERSION'." >&2
+            exit 1
+          fi
+          # gh release create would reuse an existing tag and ignore --target.
+          if git rev-parse -q --verify "refs/tags/v$VERSION" > /dev/null; then
+            echo "Tag v$VERSION already exists: give another version." >&2
             exit 1
           fi
           {
@@ -246,7 +243,8 @@ jobs:
           gh release download "v$VERSION" --pattern DreaMailRPGP.xcframework.zip --dir "$RUNNER_TEMP"
           echo "$CHECKSUM  $RUNNER_TEMP/DreaMailRPGP.xcframework.zip" | sha256sum --check
           gh attestation verify "$RUNNER_TEMP/DreaMailRPGP.xcframework.zip" --repo "$GITHUB_REPOSITORY" \
-            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
+            --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
+            --source-ref refs/heads/main --deny-self-hosted-runners
 
       - name: Update Package.swift, open the pull request, merge when green
         env:
@@ -271,15 +269,19 @@ jobs:
           # The branch is the bot's own: a re-run replaces it and reuses its
           # pull request, if one is open.
           git push -q --force origin "HEAD:refs/heads/$branch"
-          if [ -n "$(gh pr list --head "$branch" --state open --json number --jq '.[].number')" ]; then
-            echo "Reusing the open pull request for $branch."
+          # This repository's own pull request only: a fork's with the same
+          # branch name is ignored.
+          pr=$(gh pr list --head "$branch" --state open --json number,isCrossRepository \
+            --jq '.[] | select(.isCrossRepository | not) | .number' | head -n 1)
+          if [ -n "$pr" ]; then
+            echo "Reusing pull request #$pr for $branch."
           else
-            gh pr create --base "$BASE" --head "$branch" \
+            pr=$(gh pr create --base "$BASE" --head "$branch" \
             --title "Point Package.swift at release v$VERSION" \
             --body "Sets \`version\` and \`checksum\` in Package.swift to release [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION). The published zip was downloaded and checked against the checksum.
 
           Cross-check (README, \"Releasing\"): a local \`scripts/build-xcframework.sh\` on another Mac should give the same SHA-256. Once merged, DreaMail pins the merge commit in \`project.yml\`.
 
-          Opened by the Release workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), which merges it once CI passes."
+          Opened by the Release workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), which merges it once CI passes.")
           fi
-          scripts/merge_when_green.sh "$branch" "$sha"
+          scripts/merge_when_green.sh "$branch" "$sha" "$pr"
