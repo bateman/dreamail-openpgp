@@ -1,42 +1,109 @@
 name: Release
 
-# Manual only. Builds the xcframework twice in separate directories, refuses
-# to publish unless both zips are identical, then creates the GitHub release
-# v<version> with the zip and its SHA-256. Package.swift is updated to that
-# release in a separate, reviewed commit (README, "Releasing").
+# Builds the xcframework twice in separate directories, refuses to publish
+# unless both zips are identical, then creates the GitHub release v<version>
+# with the zip and its SHA-256. A last job opens the pull request that
+# points Package.swift at that release and merges it once CI passes, without
+# review (owner's decision; README, "Releasing").
+#
+# Runs by hand, or by itself when an rPGP upgrade pull request (branch
+# deps/rpgp-*) is merged into main by a person; the Upgrade rPGP workflow
+# dispatches it after merging one itself, since a merge made with
+# GITHUB_TOKEN triggers no workflow. With
+# no version given, the version is the latest release tag with the patch
+# number raised by one.
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release, e.g. 0.1.0 (tag v<version>)"
-        required: true
+        description: "Version to release, e.g. 0.1.0 (empty: latest tag, next patch)"
+        required: false
+        default: ""
+  pull_request:
+    types: [closed]
+    branches: [main]
 
 permissions:
   contents: read
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  # Picks the version and the commit, on a cheap runner. Nothing is
+  # released if that commit already carries a release tag.
+  prepare:
+    name: Choose the version
+    # By hand, or a merged rPGP upgrade from this repository (never a fork).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.event.pull_request.head.ref, 'deps/rpgp-'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The merge commit on main for a merged pull request; the
+          # dispatched ref otherwise.
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Choose and check the version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          sha=$(git rev-parse HEAD)
+          tagged=$(git tag --points-at HEAD -l 'v[0-9]*')
+          if [ -n "$tagged" ]; then
+            echo "$sha is already released as $tagged: nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -z "$VERSION" ]; then
+            last=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)
+            if [ -z "$last" ]; then
+              echo "No release tag to start from: give a version." >&2
+              exit 1
+            fi
+            IFS=. read -r major minor patch <<< "${last#v}"
+            VERSION="$major.$minor.$((patch + 1))"
+            echo "Latest release $last, releasing $VERSION."
+          fi
+          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Version must be MAJOR.MINOR.PATCH, got '$VERSION'." >&2
+            exit 1
+          fi
+          {
+            echo "version=$VERSION"
+            echo "sha=$sha"
+          } >> "$GITHUB_OUTPUT"
+
   release:
     name: Build and publish
+    needs: prepare
+    if: needs.prepare.outputs.version != ''
     runs-on: macos-26
     timeout-minutes: 45
     # Only this job may write, and only repository contents (the release).
     permissions:
       contents: write
+    outputs:
+      version: ${{ needs.prepare.outputs.version }}
+      checksum: ${{ steps.publish.outputs.checksum }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ needs.prepare.outputs.sha }}
           persist-credentials: false
           # SOURCE_DATE_EPOCH comes from the last commit touching rust/.
           fetch-depth: 0
-
-      - name: Check the version
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Version must be MAJOR.MINOR.PATCH, got '$VERSION'." >&2
-            exit 1
-          fi
 
       - name: Install the pinned Rust toolchain
         working-directory: rust
@@ -75,14 +142,73 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Publish the release
+        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           sum=$(cut -d' ' -f1 "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip.sha256")
+          commit=$(git rev-parse HEAD)
           gh release create "v$VERSION" \
             "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip" \
             "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip.sha256" \
             THIRD_PARTY_LICENSES.md \
-            --target "$GITHUB_SHA" --title "v$VERSION" \
-            --notes "DreaMailRPGP.xcframework.zip SHA-256: $sum (binaryTarget checksum). Built from $GITHUB_SHA."
+            --target "$commit" --title "v$VERSION" \
+            --notes "DreaMailRPGP.xcframework.zip SHA-256: $sum (binaryTarget checksum). Built from $commit."
+          echo "checksum=$sum" >> "$GITHUB_OUTPUT"
+
+  # Opens the pull request that points Package.swift at the new release,
+  # after checking the published zip against the checksum, and merges it
+  # once CI passes on the branch (scripts/merge_when_green.sh).
+  package:
+    name: Pull request for Package.swift
+    needs: release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: write       # push release/package-v<version>, merge
+      pull-requests: write  # open and merge the pull request
+      actions: write        # dispatch CI on the branch
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Check the published zip
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release.outputs.version }}
+          CHECKSUM: ${{ needs.release.outputs.checksum }}
+        run: |
+          gh release download "v$VERSION" --pattern DreaMailRPGP.xcframework.zip --dir "$RUNNER_TEMP"
+          echo "$CHECKSUM  $RUNNER_TEMP/DreaMailRPGP.xcframework.zip" | sha256sum --check
+
+      - name: Update Package.swift, open the pull request, merge when green
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.release.outputs.version }}
+          CHECKSUM: ${{ needs.release.outputs.checksum }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          branch="release/package-v$VERSION"
+          sed -i -E \
+            -e "s/^let version = \"[^\"]*\"$/let version = \"$VERSION\"/" \
+            -e "s/^let checksum = \"[0-9a-f]{64}\"$/let checksum = \"$CHECKSUM\"/" \
+            Package.swift
+          grep -qx "let version = \"$VERSION\"" Package.swift
+          grep -qx "let checksum = \"$CHECKSUM\"" Package.swift
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -am "Point Package.swift at release v$VERSION"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push -q "$remote" "HEAD:refs/heads/$branch"
+          gh pr create --base "$BASE" --head "$branch" \
+            --title "Point Package.swift at release v$VERSION" \
+            --body "Sets \`version\` and \`checksum\` in Package.swift to release [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION). The published zip was downloaded and checked against the checksum.
+
+          Cross-check (README, \"Releasing\"): a local \`scripts/build-xcframework.sh\` on another Mac should give the same SHA-256. Once merged, DreaMail pins the merge commit in \`project.yml\`.
+
+          Opened by the Release workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), which merges it once CI passes."
+          scripts/merge_when_green.sh "$branch"

@@ -65,8 +65,8 @@ jobs:
           cargo install cargo-deny --locked --version 0.20.2
           cargo deny --manifest-path Cargo.toml check advisories
 
-      - name: Shellcheck the build script
-        run: shellcheck ../scripts/build-xcframework.sh
+      - name: Shellcheck the scripts
+        run: shellcheck ../scripts/build-xcframework.sh ../scripts/merge_when_green.sh
 
   # The release builds this on macOS; build it here too, twice, so a break in
   # the build script or a build that is not reproducible shows on the pull

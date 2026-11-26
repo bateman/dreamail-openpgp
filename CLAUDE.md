@@ -18,6 +18,11 @@ Rules specific to this repository:
 - No key material in the repository: tests generate keys at run time.
 - Nothing logs. Never install a `log` logger in a process that links this
   library.
-- Releases only through the Release workflow, then a reviewed commit that
-  sets `version` and `checksum` in `Package.swift`. Never push to `main`
+- Releases only through the Release workflow, then the commit that sets
+  `version` and `checksum` in `Package.swift`. Never push to `main`
   directly; branch names never contain "claude".
+- rPGP upgrades and their release are automatic (owner's decision, 26
+  November 2026): the Upgrade rPGP workflow merges an upgrade that passes
+  every check without review, and the Release workflow merges the
+  `Package.swift` pull request once CI passes. Any other change, `engine.rs`
+  included, is still reviewed.

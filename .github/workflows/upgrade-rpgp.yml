@@ -1,0 +1,139 @@
+name: Upgrade rPGP
+
+# Weekly, or by hand: if crates.io has a newer stable rPGP (or the version
+# given), runs scripts/upgrade_rpgp.py on main, pushes branch
+# deps/rpgp-<version> and opens a pull request whose body is the script's
+# report.
+#
+# If every check passed, it waits for CI on the branch, merges the pull
+# request without review (owner's decision) and dispatches the Release
+# workflow. If a check failed, the pull request is a draft, left for a
+# person to fix on the branch; merging it then starts the release
+# (README, "Upgrading rPGP").
+#
+# Pull requests opened with GITHUB_TOKEN do not trigger the CI workflow, so
+# this job dispatches it on the branch; its checks then appear on the pull
+# request. Needs "Allow GitHub Actions to create and approve pull requests"
+# (Settings, Actions, General).
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "rPGP version, e.g. 0.22.0 (empty: newest stable on crates.io)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upgrade-rpgp
+  cancel-in-progress: false
+
+jobs:
+  upgrade:
+    name: Upgrade and open a pull request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    permissions:
+      contents: write       # push deps/rpgp-<version>, merge
+      pull-requests: write  # open and merge the pull request
+      actions: write        # dispatch CI and the release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        working-directory: rust
+        run: rustup toolchain install
+
+      - name: Check GnuPG for the interoperability tests
+        run: |
+          gpg --version > "$RUNNER_TEMP/gpg-version"
+          cat "$RUNNER_TEMP/gpg-version"
+          grep -qE '^gpg \(GnuPG\) 2\.4\.' "$RUNNER_TEMP/gpg-version"
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version 0.20.2
+
+      # Exit 0: up to date or all checks passed; 1: upgraded, a check failed
+      # (draft pull request); 2: could not upgrade (the job fails).
+      - name: Upgrade
+        id: upgrade
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set +e
+          if [ -n "$VERSION" ]; then
+            python3 scripts/upgrade_rpgp.py "$VERSION"
+          else
+            python3 scripts/upgrade_rpgp.py
+          fi
+          status=$?
+          set -e
+          if [ "$status" -ge 2 ]; then
+            exit "$status"
+          fi
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "rPGP is up to date." >> "$GITHUB_STEP_SUMMARY"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          report=$(ls build/rpgp-upgrade-*.md)
+          version=${report#build/rpgp-upgrade-}
+          version=${version%.md}
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "changed=true"
+            echo "version=$version"
+            echo "report=$report"
+            echo "branch=$(git branch --show-current)"
+            echo "passed=$([ "$status" -eq 0 ] && echo true || echo false)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Push the branch, open the pull request, merge when green
+        if: steps.upgrade.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ steps.upgrade.outputs.version }}
+          REPORT: ${{ steps.upgrade.outputs.report }}
+          BRANCH: ${{ steps.upgrade.outputs.branch }}
+          PASSED: ${{ steps.upgrade.outputs.passed }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code "$remote" "refs/heads/$BRANCH" > /dev/null; then
+            echo "Branch $BRANCH already exists: not opening another pull request." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A rust README.md THIRD_PARTY_LICENSES.md
+          git commit -q -m "Upgrade rPGP to $VERSION" \
+            -m "Made by the Upgrade rPGP workflow (scripts/upgrade_rpgp.py). The policy review in the pull request is still to do."
+          git push -q "$remote" "HEAD:refs/heads/$BRANCH"
+          {
+            echo
+            echo "---"
+            echo "Opened by the Upgrade rPGP workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID). CI is dispatched on this branch."
+          } >> "$REPORT"
+          if [ "$PASSED" != "true" ]; then
+            gh pr create --base "$BASE" --head "$BRANCH" --draft \
+              --title "Upgrade rPGP to $VERSION" --body-file "$REPORT"
+            gh workflow run ci.yml --ref "$BRANCH"
+            echo "A check failed: draft pull request, left for a person." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          gh pr create --base "$BASE" --head "$BRANCH" \
+            --title "Upgrade rPGP to $VERSION" --body-file "$REPORT"
+          # Every check passed: merge once CI passes too, then release. A
+          # merge made with GITHUB_TOKEN triggers no workflow, so the
+          # release is dispatched here.
+          scripts/merge_when_green.sh "$BRANCH"
+          gh workflow run release.yml --ref "$BASE"
+          echo "Merged and released: see the Release workflow." >> "$GITHUB_STEP_SUMMARY"
