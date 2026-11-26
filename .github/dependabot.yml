@@ -9,6 +9,9 @@ updates:
       interval: weekly
     open-pull-requests-limit: 5
     ignore:
+      # rPGP is upgraded by the Upgrade rPGP workflow, which also updates
+      # the README pins and the licence file (README, "Upgrading rPGP").
+      - dependency-name: pgp
       # Test-only crates that must stay on the versions rPGP itself uses
       # (its key generation takes a rand 0.8 generator). Revisit when the
       # pgp crate is upgraded.
