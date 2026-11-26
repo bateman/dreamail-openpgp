@@ -223,8 +223,9 @@ The rest is review, and stays human: the rPGP changelog; the policy in
 `rust/src/engine.rs` (error mapping, `enable_gnupg_aead`, refused
 algorithms); whether `cx448` is still mandatory and the SEIPD v2 underflow
 still there; the `rust/deny.toml` ignores and the known limits; licence files
-of new crates. Then the usual release (below) and, in DreaMail, the new
-`revision` in `project.yml` and the version in `docs/DEPENDENCIES.md`.
+of new crates. Merging the pull request starts the release by itself (below);
+then, in DreaMail, the new `revision` in `project.yml` and the version in
+`docs/DEPENDENCIES.md`.
 
 Pull requests opened with `GITHUB_TOKEN` do not trigger CI by themselves:
 the workflow dispatches CI on the branch. It needs "Allow GitHub Actions to
@@ -232,13 +233,18 @@ create and approve pull requests" (Settings, Actions, General).
 
 ## Releasing
 
-1. Run the **Release** workflow with a version, e.g. `0.1.0`. It checks
-   licences and advisories, builds the zip twice, refuses to publish if the
-   two differ, and creates release `v0.1.0` with the zip, its `.sha256` and
-   `THIRD_PARTY_LICENSES.md`.
-2. In one commit, set `version` and `checksum` in `Package.swift` to that
-   release. The checksum is in the `.sha256` file and the release notes.
-   Cross-check it with a local `scripts/build-xcframework.sh` on another Mac.
+1. The **Release** workflow runs by itself when an rPGP upgrade pull request
+   (`deps/rpgp-*`) is merged, or by hand. With no version it takes the
+   latest release tag and raises the patch number (`v0.2.0` → `0.2.1`); give
+   one by hand for a minor or major release, e.g. when the C interface
+   changes. It checks licences and advisories, builds the zip twice, refuses
+   to publish if the two differ, and creates release `v<version>` with the
+   zip, its `.sha256` and `THIRD_PARTY_LICENSES.md`.
+2. The same workflow then downloads the published zip, checks it against
+   the checksum, and opens the pull request `release/package-v<version>`
+   that sets `version` and `checksum` in `Package.swift`. Merging it is the
+   reviewed commit. Cross-check the checksum with a local
+   `scripts/build-xcframework.sh` on another Mac.
 3. DreaMail pins **that commit** in `project.yml`, the same way as GRDB:
    ```yaml
    packages:
