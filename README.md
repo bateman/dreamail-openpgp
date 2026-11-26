@@ -4,20 +4,16 @@ The OpenPGP engine of DreaMail: [rPGP](https://github.com/rpgp/rpgp) behind a
 small C interface, shipped as a prebuilt, checksummed `DreaMailRPGP.xcframework`
 for macOS (arm64 and x86_64) that SwiftPM fetches as a `binaryTarget`.
 
-Scope B (owner's decision): verify signatures (PGP/MIME detached and
-cleartext), decrypt, read and import keys. Nothing here signs, encrypts or
-generates keys. The Swift side (`RPGPEngine`, conforming to DreaMail's
+- Verify signatures (PGP/MIME detached and
+cleartext), decrypt, read and import keys.
+- Nothing here signs, encrypts or generates keys.
+- The Swift side (`RPGPEngine`, conforming to DreaMail's
 `OpenPGPEngine`) and the `DREAMAIL_PGP` build switch live in DreaMail.
-
-Releases up to v0.1.1 were published under the app's former name, MishMail:
-`MishMailRPGP.xcframework.zip`, header `mishmail_rpgp.h`, symbols `mm_pgp_*`
-and types `MMResult`/`MMBuffer`. From v0.2.0 they are `DreaMailRPGP`,
-`dreamail_rpgp.h`, `dm_pgp_*` and `DMResult`/`DMBuffer` (an ABI break).
 
 ## Why rPGP
 
 No ready-made Swift or Objective-C library is adequate (survey of 25 November
-2026, PR #56 in the app repository, then named MishMail):
+2026, PR #56 in the app repository):
 
 - ObjectivePGP is free only for non-commercial use, is RFC 4880 only, and
   vendors OpenSSL 1.1.1h, which has been out of support since 2023.
