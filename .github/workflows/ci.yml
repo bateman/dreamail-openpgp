@@ -65,6 +65,10 @@ jobs:
           cargo install cargo-deny --locked --version 0.20.2
           cargo deny --manifest-path Cargo.toml check advisories
 
+      # The supply-chain gate of the rPGP upgrades (crate age, new names).
+      - name: Test the upgrade script
+        run: python3 -m unittest discover -s ../scripts -p 'test_*.py' -v
+
       - name: Shellcheck the scripts
         run: shellcheck ../scripts/build-xcframework.sh ../scripts/merge_when_green.sh
 

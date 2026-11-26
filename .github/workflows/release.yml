@@ -6,12 +6,13 @@ name: Release
 # points Package.swift at that release and merges it once CI passes, without
 # review (owner's decision; README, "Releasing").
 #
-# Runs by hand, or by itself when an rPGP upgrade pull request (branch
-# deps/rpgp-*) is merged into main by a person; the Upgrade rPGP workflow
-# dispatches it after merging one itself, since a merge made with
-# GITHUB_TOKEN triggers no workflow. With
-# no version given, the version is the latest release tag with the patch
-# number raised by one.
+# Runs only by a manual run (workflow_dispatch) on main: by hand, or
+# dispatched by the Upgrade rPGP workflow after it merges an upgrade. Never
+# on a pull_request event, whose workflow definition would come from the
+# pull request's own branch. The attestation's signer is therefore always
+# release.yml@refs/heads/main, which DreaMail requires. With no version
+# given, the version is the latest vX.Y.Z tag with the patch number raised
+# by one.
 on:
   workflow_dispatch:
     inputs:
@@ -19,9 +20,6 @@ on:
         description: "Version to release, e.g. 0.1.0 (empty: latest tag, next patch)"
         required: false
         default: ""
-  pull_request:
-    types: [closed]
-    branches: [main]
 
 permissions:
   contents: read
@@ -35,12 +33,10 @@ jobs:
   # released if that commit already carries a release tag.
   prepare:
     name: Choose the version
-    # By hand, or a merged rPGP upgrade from this repository (never a fork).
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.pull_request.merged &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       startsWith(github.event.pull_request.head.ref, 'deps/rpgp-'))
+    # Main only. A run dispatched on another branch uses that branch's copy
+    # of this file, so this guards against mistakes, not against someone
+    # who can push workflows; DreaMail's check of the signer's ref does.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
@@ -49,9 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The merge commit on main for a merged pull request; the
-          # dispatched ref otherwise.
-          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+          ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
 
@@ -59,15 +53,21 @@ jobs:
         id: version
         env:
           VERSION: ${{ inputs.version }}
+          BASE: ${{ github.event.repository.default_branch }}
         run: |
           sha=$(git rev-parse HEAD)
+          # Only what is on main is released: never a commit from elsewhere.
+          if ! git merge-base --is-ancestor "$sha" "origin/$BASE"; then
+            echo "$sha is not on $BASE: not releasing." >&2
+            exit 1
+          fi
           tagged=$(git tag --points-at HEAD -l 'v[0-9]*')
           if [ -n "$tagged" ]; then
             echo "$sha is already released as $tagged: nothing to do." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ -z "$VERSION" ]; then
-            last=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1)
+            last=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
             if [ -z "$last" ]; then
               echo "No release tag to start from: give a version." >&2
               exit 1
@@ -80,23 +80,29 @@ jobs:
             echo "Version must be MAJOR.MINOR.PATCH, got '$VERSION'." >&2
             exit 1
           fi
+          # gh release create would reuse an existing tag and ignore --target.
+          if git rev-parse -q --verify "refs/tags/v$VERSION" > /dev/null; then
+            echo "Tag v$VERSION already exists: give another version." >&2
+            exit 1
+          fi
           {
             echo "version=$VERSION"
             echo "sha=$sha"
           } >> "$GITHUB_OUTPUT"
 
-  release:
-    name: Build and publish
+  # Builds with a read-only token: crate build scripts and proc macros run
+  # here, so this job can publish nothing. The zip goes to the next job as
+  # an artifact, with its checksum as an output.
+  build:
+    name: Build twice and compare
     needs: prepare
     if: needs.prepare.outputs.version != ''
     runs-on: macos-26
     timeout-minutes: 45
-    # Only this job may write, and only repository contents (the release).
     permissions:
-      contents: write
+      contents: read
     outputs:
-      version: ${{ needs.prepare.outputs.version }}
-      checksum: ${{ steps.publish.outputs.checksum }}
+      checksum: ${{ steps.compare.outputs.checksum }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -125,6 +131,7 @@ jobs:
           cargo deny --manifest-path Cargo.toml check advisories
 
       - name: Build twice and compare
+        id: compare
         run: |
           scripts/build-xcframework.sh "$RUNNER_TEMP/a"
           rm -rf rust/target
@@ -140,14 +147,66 @@ jobs:
             echo
             echo "Size: $(du -h "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip" | cut -f1)"
           } >> "$GITHUB_STEP_SUMMARY"
+          echo "checksum=$(cut -d' ' -f1 "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip.sha256")" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: xcframework
+          path: ${{ runner.temp }}/a/DreaMailRPGP.xcframework.zip
+          if-no-files-found: error
+          retention-days: 1
+
+  # Publishes what build made, after checking it against build's checksum,
+  # with a build provenance attestation: DreaMail verifies that the zip was
+  # made by this workflow (gh attestation verify). Runs no cargo: neither the
+  # write token nor the signing identity ever meets crate code.
+  release:
+    name: Attest and publish the release
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write      # create the release
+      id-token: write      # sign the attestation (Sigstore)
+      attestations: write  # store it
+    outputs:
+      version: ${{ needs.prepare.outputs.version }}
+      checksum: ${{ needs.build.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: xcframework
+          path: ${{ runner.temp }}/a
+
+      - name: Check the artifact against the build
+        env:
+          CHECKSUM: ${{ needs.build.outputs.checksum }}
+        run: |
+          cd "$RUNNER_TEMP/a"
+          sha256sum DreaMailRPGP.xcframework.zip > DreaMailRPGP.xcframework.zip.sha256
+          sum=$(cut -d' ' -f1 DreaMailRPGP.xcframework.zip.sha256)
+          if [ "$sum" != "$CHECKSUM" ]; then
+            echo "The artifact's SHA-256 $sum is not the build's $CHECKSUM: not publishing." >&2
+            exit 1
+          fi
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/a/DreaMailRPGP.xcframework.zip
 
       - name: Publish the release
-        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.prepare.outputs.version }}
+          CHECKSUM: ${{ needs.build.outputs.checksum }}
         run: |
-          sum=$(cut -d' ' -f1 "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip.sha256")
+          sum=$CHECKSUM
           commit=$(git rev-parse HEAD)
           gh release create "v$VERSION" \
             "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip" \
@@ -155,7 +214,6 @@ jobs:
             THIRD_PARTY_LICENSES.md \
             --target "$commit" --title "v$VERSION" \
             --notes "DreaMailRPGP.xcframework.zip SHA-256: $sum (binaryTarget checksum). Built from $commit."
-          echo "checksum=$sum" >> "$GITHUB_OUTPUT"
 
   # Opens the pull request that points Package.swift at the new release,
   # after checking the published zip against the checksum, and merges it
@@ -169,13 +227,14 @@ jobs:
       contents: write       # push release/package-v<version>, merge
       pull-requests: write  # open and merge the pull request
       actions: write        # dispatch CI on the branch
+      attestations: read    # verify the zip's provenance
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Check the published zip
+      - name: Check the published zip and its attestation
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.release.outputs.version }}
@@ -183,6 +242,9 @@ jobs:
         run: |
           gh release download "v$VERSION" --pattern DreaMailRPGP.xcframework.zip --dir "$RUNNER_TEMP"
           echo "$CHECKSUM  $RUNNER_TEMP/DreaMailRPGP.xcframework.zip" | sha256sum --check
+          gh attestation verify "$RUNNER_TEMP/DreaMailRPGP.xcframework.zip" --repo "$GITHUB_REPOSITORY" \
+            --cert-identity "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/release.yml@refs/heads/main" \
+            --source-ref refs/heads/main --deny-self-hosted-runners
 
       - name: Update Package.swift, open the pull request, merge when green
         env:
@@ -201,14 +263,25 @@ jobs:
           grep -qx "let checksum = \"$CHECKSUM\"" Package.swift
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -q -am "Point Package.swift at release v$VERSION"
-          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push -q "$remote" "HEAD:refs/heads/$branch"
-          gh pr create --base "$BASE" --head "$branch" \
+          git -c core.hooksPath=/dev/null commit -q -am "Point Package.swift at release v$VERSION"
+          sha=$(git rev-parse HEAD)
+          gh auth setup-git
+          # The branch is the bot's own: a re-run replaces it and reuses its
+          # pull request, if one is open.
+          git push -q --force origin "HEAD:refs/heads/$branch"
+          # This repository's own pull request only: a fork's with the same
+          # branch name is ignored.
+          pr=$(gh pr list --head "$branch" --state open --json number,isCrossRepository \
+            --jq '.[] | select(.isCrossRepository | not) | .number' | head -n 1)
+          if [ -n "$pr" ]; then
+            echo "Reusing pull request #$pr for $branch."
+          else
+            pr=$(gh pr create --base "$BASE" --head "$branch" \
             --title "Point Package.swift at release v$VERSION" \
             --body "Sets \`version\` and \`checksum\` in Package.swift to release [v$VERSION]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/v$VERSION). The published zip was downloaded and checked against the checksum.
 
           Cross-check (README, \"Releasing\"): a local \`scripts/build-xcframework.sh\` on another Mac should give the same SHA-256. Once merged, DreaMail pins the merge commit in \`project.yml\`.
 
-          Opened by the Release workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), which merges it once CI passes."
-          scripts/merge_when_green.sh "$branch"
+          Opened by the Release workflow ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID), which merges it once CI passes.")
+          fi
+          scripts/merge_when_green.sh "$branch" "$sha" "$pr"

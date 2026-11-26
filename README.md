@@ -201,7 +201,7 @@ optional version). When crates.io has a newer stable `pgp`, it runs
 pull request. If every check passed, it waits for CI on the branch, merges
 the pull request **without review** (owner's decision) and dispatches the
 release. If a check failed, the pull request is a draft and waits for a
-person; merging it then starts the release. Locally the same script is
+person, who runs **Release** by hand after merging it. Locally the same script is
 `make upgrade-rpgp [VERSION=X.Y.Z]`, which leaves the changes uncommitted.
 
 The script does the mechanical part:
@@ -211,12 +211,30 @@ The script does the mechanical part:
 - sets the exact pin and runs `cargo update -p pgp --precise`, so only what
   rPGP requires moves in `Cargo.lock`, and checks the lockfile checksum
   against crates.io;
-- reads the tag object and commit of git tag `v<version>`;
+- reads the tag object and commit of git tag `v<version>`, and stops unless
+  the crate's recorded source commit (`.cargo_vcs_info.json`, published
+  from a clean checkout of the repository root) is that commit. This binds
+  the version to an existing tag; it does not compare the crate's files with
+  the tag's;
 - regenerates `THIRD_PARTY_LICENSES.md` and updates "What is pinned";
-- runs tests, clippy, the licence check and cargo-deny;
+- runs tests, clippy, the licence check and cargo-deny, and checks that every
+  crate added or changed in `Cargo.lock` is at least 7 days old on crates.io
+  and that no crate name is new (otherwise: a draft pull request);
 - writes the report `build/rpgp-upgrade-<version>.md`, which is the pull
   request's body: lockfile changes, check results, and the remaining
   mentions of the old version.
+
+With no version, a run takes the newest release that is at least 7 days
+old; a version given by hand is taken at once (and is a draft if it, or any
+crate it moves, is younger). Crate code (build scripts, proc macros, tests)
+runs only in a read-only job, whose result can make the pull request a
+draft but never allows the merge. The job that holds the write token starts
+from a clean checkout of `main`, redoes only `cargo update`, `fetch` and
+`metadata` (`--no-checks`), runs the crate age and new-name check on the
+lockfile it publishes (metadata only), and publishes nothing if a file
+other than `rust/Cargo.toml`, `rust/Cargo.lock`, `README.md` or
+`THIRD_PARTY_LICENSES.md` changed. The merge is tied to the commit CI tested,
+and pull requests from forks with the same branch name are ignored.
 
 The tests are therefore the gate for an upgrade that passes them. The
 report's checklist is what a person still reads, after the merge: the rPGP
@@ -235,18 +253,33 @@ requiring a review on `main`.
 
 ## Releasing
 
-1. The **Release** workflow runs after an rPGP upgrade is merged (dispatched
-   by Upgrade rPGP, or by the merge itself when a person makes it), or by
-   hand. A commit that already carries a release tag is not released again. With no version it takes the
-   latest release tag and raises the patch number (`v0.2.0` → `0.2.1`); give
-   one by hand for a minor or major release, e.g. when the C interface
-   changes. It checks licences and advisories, builds the zip twice, refuses
-   to publish if the two differ, and creates release `v<version>` with the
-   zip, its `.sha256` and `THIRD_PARTY_LICENSES.md`.
+1. The **Release** workflow runs only as a manual run on `main`: by hand, or
+   dispatched by Upgrade rPGP after it merges an upgrade (after merging a
+   draft, run it by hand). It never runs on a pull request event, whose
+   workflow file would come from the pull request's branch. It releases only
+   a commit on `main`, never one that already carries a release tag, and
+   refuses a version whose tag exists. With no version it takes the latest
+   `vX.Y.Z` tag and raises the patch number (`v0.2.0` → `0.2.1`); give one
+   by hand for a minor or major release, e.g. when the C interface changes.
+   It checks licences and advisories and builds the zip twice, with a
+   read-only token, refusing to go on if the two differ. A separate job,
+   which runs no cargo, checks the zip against that build's SHA-256, signs a
+   build provenance attestation for it (`actions/attest-build-provenance`)
+   and creates release `v<version>` with the zip, its `.sha256` and
+   `THIRD_PARTY_LICENSES.md`. Releases are immutable (repository setting):
+   once published, assets cannot be replaced. Check a zip by hand with
+   `gh attestation verify DreaMailRPGP.xcframework.zip --repo
+   bateman/dreamail-openpgp --cert-identity
+   https://github.com/bateman/dreamail-openpgp/.github/workflows/release.yml@refs/heads/main
+   --source-ref refs/heads/main --deny-self-hosted-runners`: the signer must
+   be this file on `main`, since a run on another branch would use that
+   branch's copy of it. Releases up to v0.2.0 have no attestation.
 2. The same workflow then downloads the published zip, checks it against
-   the checksum, and opens the pull request `release/package-v<version>`
+   the checksum, verifies its attestation, and opens the pull request
+   `release/package-v<version>`
    that sets `version` and `checksum` in `Package.swift`, and merges it once
-   CI passes, without review (owner's decision). Cross-check the checksum
+   CI passes, without review (owner's decision). A re-run replaces the
+   branch and reuses its pull request. Cross-check the checksum
    with a local `scripts/build-xcframework.sh` on another Mac.
 3. DreaMail pins **that commit** in `project.yml`, the same way as GRDB:
    ```yaml

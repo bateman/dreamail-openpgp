@@ -1,41 +1,59 @@
 #!/usr/bin/env bash
-# Dispatches CI on BRANCH, waits for that run, and squash-merges the branch's
-# pull request only if CI passed. Used by the Upgrade rPGP and Release
-# workflows on the pull requests they open (README, "Upgrading rPGP").
+# Dispatches CI on BRANCH, whose head must be SHA, waits for that run, and
+# squash-merges pull request PR (a number or URL, never looked up by branch
+# name, which a fork can reuse) only if CI passed, and only at SHA (a push
+# to the branch meanwhile makes the merge fail). If CI fails, the pull
+# request goes back to draft and the script fails; a re-run marks it ready
+# again before merging. Used by the
+# Upgrade rPGP and Release workflows (README, "Upgrading rPGP").
 #
 # Pull requests opened with GITHUB_TOKEN do not trigger CI, so it is
 # dispatched here; its checks appear on the pull request. Needs gh with
 # GH_TOKEN (actions: write, contents: write, pull-requests: write) and
 # GH_REPO.
 #
-# Usage: scripts/merge_when_green.sh BRANCH
+# Usage: scripts/merge_when_green.sh BRANCH SHA PR
 set -euo pipefail
 
-branch=${1:?usage: scripts/merge_when_green.sh BRANCH}
+usage="usage: scripts/merge_when_green.sh BRANCH SHA PR"
+branch=${1:?$usage}
+sha=${2:?$usage}
+pr=${3:?$usage}
 
+runs() {
+  gh run list --workflow ci.yml --event workflow_dispatch --branch "$branch" --limit 50 \
+    --json databaseId,headSha --jq ".[] | select(.headSha == \"$sha\") | .databaseId"
+}
+
+# The dispatch returns no run id: the new run is the one on SHA that was not
+# there before (no clock comparison, no "latest").
+before=$(runs)
 gh workflow run ci.yml --ref "$branch"
-
-# The dispatch returns no run id: the branch is new, so the only
-# workflow_dispatch run of CI on it is this one.
 run=""
-for _ in $(seq 1 36); do
+for _ in $(seq 1 60); do
   sleep 5
-  run=$(gh run list --workflow ci.yml --branch "$branch" --event workflow_dispatch \
-    --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+  for id in $(runs); do
+    if ! grep -qxF "$id" <<< "$before"; then
+      run=$id
+      break
+    fi
+  done
   if [ -n "$run" ]; then
     break
   fi
 done
 if [ -z "$run" ]; then
-  echo "No CI run found on $branch: not merging." >&2
+  echo "No CI run found on $branch at $sha: not merging." >&2
   exit 1
 fi
 
-echo "Waiting for CI run $run on $branch."
+echo "Waiting for CI run $run on $branch ($sha)."
 if ! gh run watch "$run" --exit-status --interval 30 > /dev/null; then
-  echo "CI failed on $branch (run $run): not merging." >&2
+  echo "CI failed on $branch (run $run): not merging; the pull request is a draft again." >&2
+  gh pr ready "$pr" --undo || true
   exit 1
 fi
 
-gh pr merge "$branch" --squash --delete-branch
-echo "Merged $branch."
+gh pr ready "$pr" || true
+gh pr merge "$pr" --squash --delete-branch --match-head-commit "$sha"
+echo "Merged $branch at $sha."
