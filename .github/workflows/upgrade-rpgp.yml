@@ -171,6 +171,11 @@ jobs:
           if [ "$status" -ge 2 ]; then
             exit "$status"
           fi
+          # No report means the script did not finish: never push then.
+          if [ ! -f "build/rpgp-upgrade-$VERSION.md" ]; then
+            echo "The script wrote no report: not publishing." >&2
+            exit 2
+          fi
           echo "settled=$([ "$status" -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Push the branch and open the pull request, merge when green

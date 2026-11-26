@@ -242,6 +242,12 @@ def main(argv: list[str]) -> int:
     version = args[0] if args else newest_settled_version()
     if not SEMVER.match(version):
         fail(f"not a stable MAJOR.MINOR.PATCH version: {version!r}")
+    if not args and version_tuple(version) <= version_tuple(old):
+        # The pin may be ahead of every settled release (an upgrade by hand
+        # to a young one): that is up to date, not a downgrade.
+        print(f"rPGP is at {old}; no newer release past the cooldown.",
+              file=sys.stderr if check_only else sys.stdout)
+        return 0
     if version_tuple(version) < version_tuple(old):
         fail(f"{version} is older than the pinned {old}: not downgrading")
     if version == old:

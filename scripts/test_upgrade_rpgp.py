@@ -71,5 +71,15 @@ class SupplyChainTests(unittest.TestCase):
             self.assertEqual(upgrade.newest_settled_version(), "0.22.0")
 
 
+class CheckModeTests(unittest.TestCase):
+    def test_pin_ahead_of_every_settled_release_is_up_to_date(self):
+        manifest = 'pgp = { version = "=0.22.0", default-features = false }\n'
+        with mock.patch.object(upgrade, "newest_settled_version", return_value="0.21.1"), \
+                mock.patch.object(upgrade.Path, "read_text", return_value=manifest), \
+                mock.patch("sys.stdout") as stdout:
+            self.assertEqual(upgrade.main(["--check"]), 0)
+        self.assertNotIn("0.21.1\n", "".join(c.args[0] for c in stdout.write.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()
