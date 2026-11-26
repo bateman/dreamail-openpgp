@@ -254,11 +254,18 @@ requiring a review on `main`.
    by hand for a minor or major release, e.g. when the C interface changes.
    It checks licences and advisories and builds the zip twice, with a
    read-only token, refusing to go on if the two differ. A separate job,
-   which runs no cargo, checks the zip against that build's SHA-256 and
-   creates release `v<version>` with the zip, its `.sha256` and
-   `THIRD_PARTY_LICENSES.md`.
+   which runs no cargo, checks the zip against that build's SHA-256, signs a
+   build provenance attestation for it (`actions/attest-build-provenance`)
+   and creates release `v<version>` with the zip, its `.sha256` and
+   `THIRD_PARTY_LICENSES.md`. Releases are immutable (repository setting):
+   once published, assets cannot be replaced. Check a zip by hand with
+   `gh attestation verify DreaMailRPGP.xcframework.zip --repo
+   bateman/dreamail-openpgp --signer-workflow
+   bateman/dreamail-openpgp/.github/workflows/release.yml`. Releases up to
+   v0.2.0 have no attestation.
 2. The same workflow then downloads the published zip, checks it against
-   the checksum, and opens the pull request `release/package-v<version>`
+   the checksum, verifies its attestation, and opens the pull request
+   `release/package-v<version>`
    that sets `version` and `checksum` in `Package.swift`, and merges it once
    CI passes, without review (owner's decision). A re-run replaces the
    branch and reuses its pull request. Cross-check the checksum

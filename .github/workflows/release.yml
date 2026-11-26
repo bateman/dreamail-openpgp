@@ -159,15 +159,19 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # Publishes what build made, after checking it against build's checksum.
-  # Runs no cargo: the write token never meets crate code.
+  # Publishes what build made, after checking it against build's checksum,
+  # with a build provenance attestation: DreaMail verifies that the zip was
+  # made by this workflow (gh attestation verify). Runs no cargo: neither the
+  # write token nor the signing identity ever meets crate code.
   release:
-    name: Publish the release
+    name: Attest and publish the release
     needs: [prepare, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
-      contents: write  # create the release
+      contents: write      # create the release
+      id-token: write      # sign the attestation (Sigstore)
+      attestations: write  # store it
     outputs:
       version: ${{ needs.prepare.outputs.version }}
       checksum: ${{ needs.build.outputs.checksum }}
@@ -182,11 +186,8 @@ jobs:
           name: xcframework
           path: ${{ runner.temp }}/a
 
-      - name: Publish the release
+      - name: Check the artifact against the build
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          VERSION: ${{ needs.prepare.outputs.version }}
           CHECKSUM: ${{ needs.build.outputs.checksum }}
         run: |
           cd "$RUNNER_TEMP/a"
@@ -196,7 +197,19 @@ jobs:
             echo "The artifact's SHA-256 $sum is not the build's $CHECKSUM: not publishing." >&2
             exit 1
           fi
-          cd "$GITHUB_WORKSPACE"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/a/DreaMailRPGP.xcframework.zip
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          CHECKSUM: ${{ needs.build.outputs.checksum }}
+        run: |
+          sum=$CHECKSUM
           commit=$(git rev-parse HEAD)
           gh release create "v$VERSION" \
             "$RUNNER_TEMP/a/DreaMailRPGP.xcframework.zip" \
@@ -217,13 +230,14 @@ jobs:
       contents: write       # push release/package-v<version>, merge
       pull-requests: write  # open and merge the pull request
       actions: write        # dispatch CI on the branch
+      attestations: read    # verify the zip's provenance
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
 
-      - name: Check the published zip
+      - name: Check the published zip and its attestation
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.release.outputs.version }}
@@ -231,6 +245,8 @@ jobs:
         run: |
           gh release download "v$VERSION" --pattern DreaMailRPGP.xcframework.zip --dir "$RUNNER_TEMP"
           echo "$CHECKSUM  $RUNNER_TEMP/DreaMailRPGP.xcframework.zip" | sha256sum --check
+          gh attestation verify "$RUNNER_TEMP/DreaMailRPGP.xcframework.zip" --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml"
 
       - name: Update Package.swift, open the pull request, merge when green
         env:
