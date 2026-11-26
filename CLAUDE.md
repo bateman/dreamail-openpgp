@@ -5,6 +5,11 @@ OpenPGP engine it links as a prebuilt `binaryTarget`. DreaMail's `CLAUDE.md`
 applies here too: communication style, review tiers, the owner writes in
 Italian (answer in Italian; code, commits and documents stay in English).
 
+Reviews follow DreaMail's tiers, before the merge, with the skills in
+`.claude/skills` (copied from DreaMail): `ponytail-review` in `full` mode,
+and for a Standard change the `security-audit` in parallel. Almost every
+change here is Standard (CI, dependencies, release, `engine.rs`).
+
 Rules specific to this repository:
 
 - Scope B only (verify, decrypt, read and import keys). Do not add signing,
