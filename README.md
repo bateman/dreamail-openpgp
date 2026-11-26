@@ -211,12 +211,23 @@ The script does the mechanical part:
 - sets the exact pin and runs `cargo update -p pgp --precise`, so only what
   rPGP requires moves in `Cargo.lock`, and checks the lockfile checksum
   against crates.io;
-- reads the tag object and commit of git tag `v<version>`;
+- reads the tag object and commit of git tag `v<version>`, and stops unless
+  the crate's recorded source commit (`.cargo_vcs_info.json`) is that commit;
 - regenerates `THIRD_PARTY_LICENSES.md` and updates "What is pinned";
-- runs tests, clippy, the licence check and cargo-deny;
+- runs tests, clippy, the licence check and cargo-deny, and checks that every
+  crate added or changed in `Cargo.lock` is at least 7 days old on crates.io
+  and that no crate name is new (otherwise: a draft pull request);
 - writes the report `build/rpgp-upgrade-<version>.md`, which is the pull
   request's body: lockfile changes, check results, and the remaining
   mentions of the old version.
+
+The weekly run takes a release only once it is 7 days old; a version given
+by hand is taken at once. Crate code (build scripts, proc macros, tests)
+runs only in a read-only job. The job that holds the write token starts
+from a clean checkout of `main`, redoes only `cargo update`, `fetch` and
+`metadata` (`--no-checks`), and publishes nothing if a file other than
+`rust/Cargo.toml`, `rust/Cargo.lock`, `README.md` or
+`THIRD_PARTY_LICENSES.md` changed. The merge is tied to the commit CI tested.
 
 The tests are therefore the gate for an upgrade that passes them. The
 report's checklist is what a person still reads, after the merge: the rPGP
@@ -237,16 +248,20 @@ requiring a review on `main`.
 
 1. The **Release** workflow runs after an rPGP upgrade is merged (dispatched
    by Upgrade rPGP, or by the merge itself when a person makes it), or by
-   hand. A commit that already carries a release tag is not released again. With no version it takes the
-   latest release tag and raises the patch number (`v0.2.0` → `0.2.1`); give
-   one by hand for a minor or major release, e.g. when the C interface
-   changes. It checks licences and advisories, builds the zip twice, refuses
-   to publish if the two differ, and creates release `v<version>` with the
-   zip, its `.sha256` and `THIRD_PARTY_LICENSES.md`.
+   hand from `main`. It releases only a commit on `main`, and never one that
+   already carries a release tag. With no version it takes the latest
+   `vX.Y.Z` tag and raises the patch number (`v0.2.0` → `0.2.1`); give one
+   by hand for a minor or major release, e.g. when the C interface changes.
+   It checks licences and advisories and builds the zip twice, with a
+   read-only token, refusing to go on if the two differ. A separate job,
+   which runs no cargo, checks the zip against that build's SHA-256 and
+   creates release `v<version>` with the zip, its `.sha256` and
+   `THIRD_PARTY_LICENSES.md`.
 2. The same workflow then downloads the published zip, checks it against
    the checksum, and opens the pull request `release/package-v<version>`
    that sets `version` and `checksum` in `Package.swift`, and merges it once
-   CI passes, without review (owner's decision). Cross-check the checksum
+   CI passes, without review (owner's decision). A re-run replaces the
+   branch and reuses its pull request. Cross-check the checksum
    with a local `scripts/build-xcframework.sh` on another Mac.
 3. DreaMail pins **that commit** in `project.yml`, the same way as GRDB:
    ```yaml
